@@ -131,28 +131,41 @@ valid_position() {
   [[ $1 =~ ^-?[0-9]+x-?[0-9]+$ ]]
 }
 
+valid_layout() {
+  [[ $1 =~ ^[A-Za-z0-9._:,x-]+$ ]]
+}
+
 # "auto" is order-dependent, not identity-based: it appends a panel after
-# whatever else is already positioned. Toggling the internal panel off then
-# back on with "auto" can therefore swap places with a monitor that stayed
-# up the whole time, so its live position is captured here, before it goes
-# down, the same way current_internal_scale captures the scale.
+# whatever else is already positioned, so leaving clamshell can put the panel
+# on the wrong side of a monitor that stayed up the whole time. The live
+# position is captured here, before the panel goes down, the same way
+# current_internal_scale captures the scale.
 current_internal_position() {
   [[ -n $INTERNAL ]] || return 0
   hyprctl monitors all -j | jq -r --arg internal "$INTERNAL" '.[] | select(.name == $internal and .disabled != true) | "\(.x)x\(.y)"' | head -1
 }
 
+# The enabled outputs other than the panel, by name and size. A position is
+# only meaningful next to the monitors it was captured beside, so this is what
+# tells a return to the same desk from a different one. Their own positions are
+# left out: the compositor rearranges them when the panel goes down.
+current_external_layout() {
+  hyprctl monitors all -j | jq -r '[.[] | select(.name | test("^(eDP|LVDS|DSI)-") | not) | select(.disabled != true) | "\(.name):\(.width)x\(.height)"] | sort | join(",")'
+}
+
+# Line one is the position, line two the external layout it belongs to.
 store_internal_position() {
-  local position="$1"
-  valid_position "$position" || return 0
+  local position="$1" layout="$2"
+  valid_position "$position" && valid_layout "$layout" || return 0
 
   mkdir -p "$TOGGLES_DIR"
-  printf '%s\n' "$position" >"$POSITION_STATE"
+  printf '%s\n%s\n' "$position" "$layout" >"$POSITION_STATE"
 }
 
 remember_internal_position() {
   local position
   position=$(current_internal_position)
-  store_internal_position "$position"
+  store_internal_position "$position" "$(current_external_layout)"
 }
 
 # $1 is the configured scale when the caller has already read it, so one sync
@@ -188,14 +201,6 @@ read_monitor_position() {
   if [[ $position =~ ^[-[:alnum:]_.+]+$ ]]; then
     echo "$position"
     return
-  fi
-
-  if [[ -f $POSITION_STATE ]]; then
-    position=$(<"$POSITION_STATE")
-    if valid_position "$position"; then
-      echo "$position"
-      return
-    fi
   fi
 
   echo auto
@@ -236,6 +241,27 @@ sync_internal_scale() {
   enable_internal_output "$desired_scale"
 }
 
+# Put the panel back where it sat before docking. Runs once, on leaving
+# clamshell and after the reload has re-enabled the panel at "auto", and spends
+# the remembered position either way: it is only good for the desk it was
+# captured at, so one that does not match the monitors present now is dropped.
+restore_internal_position() {
+  [[ -n $INTERNAL && -f $POSITION_STATE ]] || return 0
+
+  local position layout scale
+  { read -r position; read -r layout; } <"$POSITION_STATE" || true
+  rm -f "$POSITION_STATE"
+
+  valid_position "$position" && valid_layout "$layout" || return 0
+  [[ $layout == "$(current_external_layout)" ]] || return 0
+  [[ $(read_monitor_position) == "auto" ]] || return 0
+  [[ $position == "$(current_internal_position)" ]] && return 0
+
+  scale=$(current_internal_scale)
+  valid_scale "$scale" || scale=$(read_monitor_scale)
+  hyprctl eval "hl.monitor({ output = \"$INTERNAL\", mode = \"preferred\", position = \"$position\", scale = $scale })" >/dev/null 2>&1 || true
+}
+
 dpms_internal() {
   local action="$1"
 
@@ -259,6 +285,7 @@ enable_internal() {
   sync_internal_scale
 
   if (( changed )); then
+    restore_internal_position
     dpms_internal enable
   fi
 }
