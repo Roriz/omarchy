@@ -145,19 +145,47 @@ current_internal_position() {
   hyprctl monitors all -j | jq -r --arg internal "$INTERNAL" '.[] | select(.name == $internal and .disabled != true) | "\(.x)x\(.y)"' | head -1
 }
 
-# The enabled outputs other than the panel, by make, model, serial and size. A
-# position is only meaningful next to the monitors it was captured beside, so
-# this is what tells a return to the same desk from a different one. The EDID
-# identity follows the physical monitor across ports and docks; the connector
-# name stands in only for a monitor that reports none. Their own positions are
-# left out: the compositor rearranges them when the panel goes down.
+# The enabled outputs other than the panel. A position is only meaningful next
+# to the monitors it was captured beside, so this is what tells a return to the
+# same desk from a different one. Each monitor is named by the most specific
+# thing it reports, and nothing less specific is mixed in: a serial identifies
+# the physical monitor across ports, docks and resolution changes, so it stands
+# alone; make and model identify a kind of monitor and add its size; a monitor
+# reporting neither is only its connector and size. Their own positions are left
+# out: the compositor rearranges them when the panel goes down.
 current_external_layout() {
   hyprctl monitors all -j | jq -r '[.[]
     | select(.name | test("^(eDP|LVDS|DSI)-") | not)
     | select(.disabled != true)
-    | ([.make, .model, .serial] | map(select(. != null and . != "")) | join(" ")) as $identity
-    | "\(if $identity == "" then .name else $identity end | gsub("[^A-Za-z0-9._-]"; "_")):\(.width)x\(.height)"]
+    | ([.make, .model] | map(select(. != null and . != "")) | join(" ")) as $kind
+    | (if (.serial // "") != "" then ([$kind, .serial] | map(select(. != "")) | join(" "))
+       elif $kind != "" then "\($kind):\(.width)x\(.height)"
+       else "\(.name):\(.width)x\(.height)" end
+       | gsub("[^A-Za-z0-9._:-]"; "_"))]
     | sort | join(",")'
+}
+
+# Whether a panel at $1 with the given logical size would sit on top of an
+# enabled external. Sizes are in layout pixels: the mode divided by the scale,
+# with width and height swapped for a transform that rotates by a quarter turn.
+position_overlaps_external() {
+  local position="$1" width="$2" height="$3"
+
+  hyprctl monitors all -j | jq -e --arg position "$position" --argjson width "$width" --argjson height "$height" '
+    ($position | split("x") | map(tonumber)) as [$x, $y]
+    | [.[]
+      | select(.name | test("^(eDP|LVDS|DSI)-") | not)
+      | select(.disabled != true)
+      | (if (.transform // 0) % 2 == 1 then [.height, .width] else [.width, .height] end) as [$w, $h]
+      | select($x < .x + $w / .scale and .x < $x + $width and $y < .y + $h / .scale and .y < $y + $height)]
+    | length > 0' >/dev/null
+}
+
+current_internal_logical_size() {
+  [[ -n $INTERNAL ]] || return 0
+  hyprctl monitors all -j | jq -r --arg internal "$INTERNAL" '.[] | select(.name == $internal and .disabled != true)
+    | (if (.transform // 0) % 2 == 1 then [.height, .width] else [.width, .height] end) as [$w, $h]
+    | "\($w / .scale) \($h / .scale)"' | head -1
 }
 
 # Line one is the position, line two the external layout it belongs to.
@@ -219,6 +247,13 @@ enable_internal_output() {
   local position
   [[ -n $scale ]] || scale=$(read_monitor_scale)
   position=$(read_monitor_position)
+  # A panel that is already on holds a place of its own. Re-applying it with
+  # "auto" would send it to the end of the layout, so a scale correction keeps
+  # it where it is.
+  if [[ $position == "auto" ]]; then
+    position=$(current_internal_position)
+    valid_position "$position" || position=auto
+  fi
   hyprctl eval "hl.monitor({ output = \"$INTERNAL\", mode = \"preferred\", position = \"$position\", scale = $scale })" >/dev/null 2>&1 || true
 }
 
@@ -255,7 +290,7 @@ sync_internal_scale() {
 restore_internal_position() {
   [[ -n $INTERNAL && -f $POSITION_STATE ]] || return 0
 
-  local position layout scale
+  local position layout scale width height
   { read -r position; read -r layout; } <"$POSITION_STATE" || true
   rm -f "$POSITION_STATE"
 
@@ -263,6 +298,12 @@ restore_internal_position() {
   [[ $layout == "$(current_external_layout)" ]] || return 0
   [[ $(read_monitor_position) == "auto" ]] || return 0
   [[ $position == "$(current_internal_position)" ]] && return 0
+
+  # The externals may have been rearranged since the position was captured, so
+  # a place that was free then can be taken now.
+  read -r width height <<<"$(current_internal_logical_size)"
+  [[ -n $width && -n $height ]] || return 0
+  ! position_overlaps_external "$position" "$width" "$height" || return 0
 
   scale=$(current_internal_scale)
   valid_scale "$scale" || scale=$(read_monitor_scale)

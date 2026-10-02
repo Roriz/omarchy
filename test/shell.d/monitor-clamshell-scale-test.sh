@@ -27,16 +27,17 @@ if [[ $1 == "monitors" && $2 == "all" && $3 == "-j" ]]; then
   # A real `hyprctl monitors all -j` lists every output, not just the
   # internal one -- keep an external entry in the array so selection-by-name
   # is exercised the same way it is in production, for every case below.
-  external=$(printf '{"name":"%s","make":"%s","model":"%s","serial":"%s","disabled":false,"scale":1,"x":1920,"y":0,"width":%s,"height":%s}' \
+  external=$(printf '{"name":"%s","make":"%s","model":"%s","serial":"%s","disabled":false,"scale":1,"transform":%s,"x":%s,"y":0,"width":%s,"height":%s}' \
     "${OMARCHY_TEST_EXTERNAL_NAME:-HDMI-A-1}" "${OMARCHY_TEST_EXTERNAL_MAKE-Samsung Electric Company}" \
     "${OMARCHY_TEST_EXTERNAL_MODEL-LF24T35}" "${OMARCHY_TEST_EXTERNAL_SERIAL-HX5X721467}" \
+    "${OMARCHY_TEST_EXTERNAL_TRANSFORM:-0}" "${OMARCHY_TEST_EXTERNAL_X:-1920}" \
     "${OMARCHY_TEST_EXTERNAL_WIDTH:-1920}" "${OMARCHY_TEST_EXTERNAL_HEIGHT:-1080}")
   # A real reload re-enables the panel once the clamshell flag is gone, at
   # whatever position the catch-all rule gave it.
   if [[ ${OMARCHY_TEST_INTERNAL_DISABLED:-false} == "true" && ! -f $OMARCHY_TEST_RELOADED ]]; then
     printf '[%s,{"name":"eDP-1","disabled":true,"scale":null,"x":null,"y":null}]' "$external"
   else
-    printf '[%s,{"name":"eDP-1","disabled":false,"scale":%s,"x":%s,"y":%s}]' \
+    printf '[%s,{"name":"eDP-1","disabled":false,"scale":%s,"transform":0,"width":1920,"height":1080,"x":%s,"y":%s}]' \
       "$external" "${OMARCHY_TEST_INTERNAL_SCALE:-2}" "${OMARCHY_TEST_INTERNAL_X:-0}" "${OMARCHY_TEST_INTERNAL_Y:-0}"
   fi
 elif [[ $1 == "eval" ]]; then
@@ -248,7 +249,7 @@ remember_scale() {
 
 remember_position() {
   mkdir -p "$state_dir"
-  printf '%s\n%s\n' "$1" "${2:-Samsung_Electric_Company_LF24T35_HX5X721467:1920x1080}" >"$position_state"
+  printf '%s\n%s\n' "$1" "${2:-Samsung_Electric_Company_LF24T35_HX5X721467}" >"$position_state"
 }
 
 # OMARCHY_TEST_UNDOCK=true starts from a docked state: the clamshell flag is set
@@ -266,6 +267,8 @@ run_clamshell() {
     OMARCHY_TEST_EXTERNAL_MAKE="${OMARCHY_TEST_EXTERNAL_MAKE-Samsung Electric Company}" \
     OMARCHY_TEST_EXTERNAL_MODEL="${OMARCHY_TEST_EXTERNAL_MODEL-LF24T35}" \
     OMARCHY_TEST_EXTERNAL_SERIAL="${OMARCHY_TEST_EXTERNAL_SERIAL-HX5X721467}" \
+    OMARCHY_TEST_EXTERNAL_X="${OMARCHY_TEST_EXTERNAL_X:-1920}" \
+    OMARCHY_TEST_EXTERNAL_TRANSFORM="${OMARCHY_TEST_EXTERNAL_TRANSFORM:-0}" \
     OMARCHY_TEST_EXTERNAL_WIDTH="${OMARCHY_TEST_EXTERNAL_WIDTH:-1920}" \
     OMARCHY_TEST_EXTERNAL_HEIGHT="${OMARCHY_TEST_EXTERNAL_HEIGHT:-1080}" \
     PATH="$stub_bin:$PATH" \
@@ -336,7 +339,7 @@ rm -f "$position_state"
 OMARCHY_TEST_INTERNAL_X=0 OMARCHY_TEST_INTERNAL_Y=0 OMARCHY_TEST_EXTERNAL_ACTIVE=true OMARCHY_TEST_CLAMSHELL=true run_clamshell
 [[ -f $position_state ]] || fail "clamshell disable remembers internal position"
 [[ $(sed -n 1p "$position_state") == "0x0" ]] || fail "clamshell disable remembers internal position value"
-[[ $(sed -n 2p "$position_state") == "Samsung_Electric_Company_LF24T35_HX5X721467:1920x1080" ]] || fail "clamshell disable remembers the external layout beside it"
+[[ $(sed -n 2p "$position_state") == "Samsung_Electric_Company_LF24T35_HX5X721467" ]] || fail "clamshell disable remembers the external layout beside it"
 pass "clamshell disable remembers internal position and external layout"
 
 # The undock the stock config actually sees: the reload re-enables the panel at
@@ -381,13 +384,57 @@ OMARCHY_TEST_UNDOCK=true OMARCHY_TEST_INTERNAL_DISABLED=true OMARCHY_TEST_INTERN
 [[ ! -f $position_state ]] || fail "undock drops a position remembered beside different monitors"
 pass "undock ignores a position from a different desk"
 
-# The same output name with a different size is a different monitor.
-remember_position "1920x0"
+# A serial names the physical monitor, so a resolution change while docked is
+# still the same desk. Its panel place is free of the (now larger) external.
+remember_position "3840x0"
+: >"$eval_log"
+OMARCHY_TEST_UNDOCK=true OMARCHY_TEST_INTERNAL_DISABLED=true OMARCHY_TEST_INTERNAL_X=1920 OMARCHY_TEST_INTERNAL_Y=0 \
+  OMARCHY_TEST_EXTERNAL_X=0 OMARCHY_TEST_EXTERNAL_WIDTH=3840 OMARCHY_TEST_EXTERNAL_HEIGHT=2160 OMARCHY_TEST_EXTERNAL_ACTIVE=true run_clamshell
+grep -F 'position = "3840x0"' "$eval_log" >/dev/null || fail "undock restores beside a monitor whose resolution changed"
+pass "undock restores beside a monitor whose resolution changed"
+
+# Without a serial the size is all that tells two monitors of one model apart.
+remember_position "1920x0" "Samsung_Electric_Company_LF24T35:1920x1080"
 : >"$eval_log"
 OMARCHY_TEST_UNDOCK=true OMARCHY_TEST_INTERNAL_DISABLED=true OMARCHY_TEST_INTERNAL_X=3840 OMARCHY_TEST_INTERNAL_Y=0 \
-  OMARCHY_TEST_EXTERNAL_WIDTH=3840 OMARCHY_TEST_EXTERNAL_HEIGHT=2160 OMARCHY_TEST_EXTERNAL_ACTIVE=true run_clamshell
-! grep -F 'position = ' "$eval_log" >/dev/null || fail "undock ignores a position remembered beside a monitor of another size"
-pass "undock ignores a position remembered beside a monitor of another size"
+  OMARCHY_TEST_EXTERNAL_SERIAL= OMARCHY_TEST_EXTERNAL_X=0 OMARCHY_TEST_EXTERNAL_WIDTH=3840 OMARCHY_TEST_EXTERNAL_HEIGHT=2160 \
+  OMARCHY_TEST_EXTERNAL_ACTIVE=true run_clamshell
+! grep -F 'position = ' "$eval_log" >/dev/null || fail "undock tells serial-less monitors of one model apart by size"
+pass "undock tells serial-less monitors of one model apart by size"
+
+# The externals moved while the panel was off: the remembered place is now
+# taken, so the panel stays where the reload put it rather than on top of one.
+remember_position "0x0"
+: >"$eval_log"
+OMARCHY_TEST_UNDOCK=true OMARCHY_TEST_INTERNAL_DISABLED=true OMARCHY_TEST_INTERNAL_X=1920 OMARCHY_TEST_INTERNAL_Y=0 \
+  OMARCHY_TEST_EXTERNAL_X=0 OMARCHY_TEST_EXTERNAL_ACTIVE=true run_clamshell
+! grep -F 'position = ' "$eval_log" >/dev/null || fail "undock never restores a position that overlaps an external"
+[[ ! -f $position_state ]] || fail "undock still spends a position it declined to apply"
+pass "undock refuses a remembered position that now overlaps an external"
+
+# A rotated external is as wide as it is tall, in layout pixels.
+remember_position "960x0"
+: >"$eval_log"
+OMARCHY_TEST_UNDOCK=true OMARCHY_TEST_INTERNAL_DISABLED=true OMARCHY_TEST_INTERNAL_X=3000 OMARCHY_TEST_INTERNAL_Y=0 \
+  OMARCHY_TEST_EXTERNAL_X=0 OMARCHY_TEST_EXTERNAL_TRANSFORM=1 OMARCHY_TEST_EXTERNAL_ACTIVE=true run_clamshell
+! grep -F 'position = ' "$eval_log" >/dev/null || fail "undock honours a rotated external's real width"
+remember_position "1080x0"
+: >"$eval_log"
+OMARCHY_TEST_UNDOCK=true OMARCHY_TEST_INTERNAL_DISABLED=true OMARCHY_TEST_INTERNAL_X=3000 OMARCHY_TEST_INTERNAL_Y=0 \
+  OMARCHY_TEST_EXTERNAL_X=0 OMARCHY_TEST_EXTERNAL_TRANSFORM=1 OMARCHY_TEST_EXTERNAL_ACTIVE=true run_clamshell
+grep -F 'position = "1080x0"' "$eval_log" >/dev/null || fail "undock restores beside a rotated external"
+pass "undock measures a rotated external by its rotated size"
+
+# Scale correction of a panel that is already on keeps its place, instead of
+# sending it to the end of the layout with "auto".
+write_catchall_scale_only_config
+rm -f "$position_state"
+: >"$eval_log"
+OMARCHY_TEST_INTERNAL_SCALE=3 OMARCHY_TEST_INTERNAL_X=0 OMARCHY_TEST_INTERNAL_Y=0 run_clamshell
+grep -F 'scale = 1.5' "$eval_log" >/dev/null || fail "a live scale correction applies the configured scale"
+grep -F 'position = "0x0"' "$eval_log" >/dev/null || fail "a live scale correction keeps the panel's live position"
+! grep -F 'position = "auto"' "$eval_log" >/dev/null || fail "a live scale correction does not send an enabled panel to auto"
+pass "a live scale correction keeps the panel where it is"
 
 # Two identical monitors are told apart by serial, wherever they are plugged in.
 write_default_auto_config
@@ -402,7 +449,7 @@ pass "undock ignores a position remembered beside an identical monitor with anot
 remember_position "1920x0"
 : >"$eval_log"
 OMARCHY_TEST_UNDOCK=true OMARCHY_TEST_INTERNAL_DISABLED=true OMARCHY_TEST_INTERNAL_X=3840 OMARCHY_TEST_INTERNAL_Y=0 \
-  OMARCHY_TEST_EXTERNAL_NAME=DP-3 OMARCHY_TEST_EXTERNAL_ACTIVE=true run_clamshell
+  OMARCHY_TEST_EXTERNAL_NAME=DP-3 OMARCHY_TEST_EXTERNAL_X=0 OMARCHY_TEST_EXTERNAL_ACTIVE=true run_clamshell
 grep -F 'position = "1920x0"' "$eval_log" >/dev/null || fail "undock matches the same monitor on another connector"
 pass "undock matches the same monitor on another connector"
 
@@ -411,24 +458,22 @@ pass "undock matches the same monitor on another connector"
 remember_position "1920x0" "Samsung_Electric_Company_LF24T35:1920x1080"
 : >"$eval_log"
 OMARCHY_TEST_UNDOCK=true OMARCHY_TEST_INTERNAL_DISABLED=true OMARCHY_TEST_INTERNAL_X=3840 OMARCHY_TEST_INTERNAL_Y=0 \
-  OMARCHY_TEST_EXTERNAL_SERIAL= OMARCHY_TEST_EXTERNAL_ACTIVE=true run_clamshell
+  OMARCHY_TEST_EXTERNAL_SERIAL= OMARCHY_TEST_EXTERNAL_X=0 OMARCHY_TEST_EXTERNAL_ACTIVE=true run_clamshell
 grep -F 'position = "1920x0"' "$eval_log" >/dev/null || fail "undock matches a serial-less monitor on make and model"
 remember_position "1920x0" "HDMI-A-1:1920x1080"
 : >"$eval_log"
 OMARCHY_TEST_UNDOCK=true OMARCHY_TEST_INTERNAL_DISABLED=true OMARCHY_TEST_INTERNAL_X=3840 OMARCHY_TEST_INTERNAL_Y=0 \
-  OMARCHY_TEST_EXTERNAL_MAKE= OMARCHY_TEST_EXTERNAL_MODEL= OMARCHY_TEST_EXTERNAL_SERIAL= OMARCHY_TEST_EXTERNAL_ACTIVE=true run_clamshell
+  OMARCHY_TEST_EXTERNAL_MAKE= OMARCHY_TEST_EXTERNAL_MODEL= OMARCHY_TEST_EXTERNAL_SERIAL= OMARCHY_TEST_EXTERNAL_X=0 OMARCHY_TEST_EXTERNAL_ACTIVE=true run_clamshell
 grep -F 'position = "1920x0"' "$eval_log" >/dev/null || fail "undock falls back to the connector name for a monitor with no identity"
 pass "undock falls back from serial to make and model to connector name"
 
 # A stale position must never leak into later scale corrections, which are
-# idle-wake business and not part of leaving clamshell.
+# idle-wake business and not part of leaving clamshell: they follow the panel.
 write_catchall_scale_only_config
 remember_position "1920x0"
 : >"$eval_log"
 OMARCHY_TEST_INTERNAL_SCALE=3 run_clamshell
-grep -F 'scale = 1.5' "$eval_log" >/dev/null || fail "a live scale correction still applies the configured scale"
 ! grep -F 'position = "1920x0"' "$eval_log" >/dev/null || fail "a live scale correction does not carry the remembered position"
-grep -F 'position = "auto"' "$eval_log" >/dev/null || fail "a live scale correction leaves the position to auto"
 pass "a live scale correction does not reuse the remembered position"
 
 # Scale recovery of a panel that is still off, with nothing remembered, still
@@ -533,7 +578,7 @@ grep -F 'position = "0x0"' "$eval_log" >/dev/null || fail "first undock restores
 OMARCHY_TEST_INTERNAL_X=2560 OMARCHY_TEST_INTERNAL_Y=0 OMARCHY_TEST_EXTERNAL_ACTIVE=true OMARCHY_TEST_CLAMSHELL=true run_clamshell
 : >"$eval_log"
 OMARCHY_TEST_UNDOCK=true OMARCHY_TEST_INTERNAL_DISABLED=true OMARCHY_TEST_INTERNAL_X=1920 OMARCHY_TEST_INTERNAL_Y=0 \
-  OMARCHY_TEST_EXTERNAL_ACTIVE=true run_clamshell
+  OMARCHY_TEST_EXTERNAL_X=0 OMARCHY_TEST_EXTERNAL_ACTIVE=true run_clamshell
 grep -F 'position = "2560x0"' "$eval_log" >/dev/null || fail "second undock restores the rearranged position"
 ! grep -F 'position = "0x0"' "$eval_log" >/dev/null || fail "second undock does not fall back to the stale first position"
 pass "successive dock/undock cycles track a rearranged position without staleness"
