@@ -32,6 +32,8 @@ if [[ $1 == "monitors" && $2 == "all" && $3 == "-j" ]]; then
     "${OMARCHY_TEST_EXTERNAL_MODEL-LF24T35}" "${OMARCHY_TEST_EXTERNAL_SERIAL-HX5X721467}" \
     "${OMARCHY_TEST_EXTERNAL_TRANSFORM:-0}" "${OMARCHY_TEST_EXTERNAL_X:-1920}" \
     "${OMARCHY_TEST_EXTERNAL_WIDTH:-1920}" "${OMARCHY_TEST_EXTERNAL_HEIGHT:-1080}")
+  # More outputs, as ready-made JSON objects joined by commas.
+  [[ -z ${OMARCHY_TEST_EXTRA_EXTERNALS:-} ]] || external="$external,$OMARCHY_TEST_EXTRA_EXTERNALS"
   # A real reload re-enables the panel once the clamshell flag is gone, at
   # whatever position the catch-all rule gave it.
   if [[ ${OMARCHY_TEST_INTERNAL_DISABLED:-false} == "true" && ! -f $OMARCHY_TEST_RELOADED ]]; then
@@ -267,6 +269,7 @@ run_clamshell() {
     OMARCHY_TEST_EXTERNAL_MAKE="${OMARCHY_TEST_EXTERNAL_MAKE-Samsung Electric Company}" \
     OMARCHY_TEST_EXTERNAL_MODEL="${OMARCHY_TEST_EXTERNAL_MODEL-LF24T35}" \
     OMARCHY_TEST_EXTERNAL_SERIAL="${OMARCHY_TEST_EXTERNAL_SERIAL-HX5X721467}" \
+    OMARCHY_TEST_EXTRA_EXTERNALS="${OMARCHY_TEST_EXTRA_EXTERNALS:-}" \
     OMARCHY_TEST_EXTERNAL_X="${OMARCHY_TEST_EXTERNAL_X:-1920}" \
     OMARCHY_TEST_EXTERNAL_TRANSFORM="${OMARCHY_TEST_EXTERNAL_TRANSFORM:-0}" \
     OMARCHY_TEST_EXTERNAL_WIDTH="${OMARCHY_TEST_EXTERNAL_WIDTH:-1920}" \
@@ -395,6 +398,37 @@ OMARCHY_TEST_EXTERNAL_X=2500 undock
 grep -F 'position = "580x0"' "$eval_log" >/dev/null || fail "undock applies the offset to the external's new position"
 ! grep -F 'position = "-1920x0"' "$eval_log" >/dev/null || fail "undock does not reuse the offset as an absolute position"
 pass "undock applies the remembered offset relative to the external's new position"
+
+# Monitors that report the same identity can swap connectors while docked, so
+# none of them can anchor the offset. With nothing else to measure from, nothing
+# is saved; with a monitor of its own among them, that one is the anchor and the
+# twins swapping places changes nothing.
+twin() {
+  printf '{"name":"%s","make":"Samsung Electric Company","model":"LF24T35","serial":"HX5X721467","disabled":false,"scale":1,"transform":0,"x":%s,"y":0,"width":1920,"height":1080}' "$1" "$2"
+}
+unique() {
+  printf '{"name":"DP-1","make":"Dell","model":"U2723QE","serial":"UNIQ1","disabled":false,"scale":1,"transform":0,"x":%s,"y":0,"width":1920,"height":1080}' "$1"
+}
+
+write_default_auto_config
+rm -f "$position_state"
+OMARCHY_TEST_EXTRA_EXTERNALS=$(twin HDMI-A-2 3840) dock
+[[ ! -f $position_state ]] || fail "clamshell disable saves nothing when every external has a twin"
+pass "clamshell disable saves nothing when no external can anchor the offset"
+
+remember_position "-1920x0" "Samsung_Electric_Company_LF24T35_HX5X721467,Samsung_Electric_Company_LF24T35_HX5X721467"
+: >"$eval_log"
+OMARCHY_TEST_EXTRA_EXTERNALS=$(twin HDMI-A-2 1920) undock
+! grep -F 'position = ' "$eval_log" >/dev/null || fail "undock restores nothing when every external has a twin"
+pass "undock restores nothing when no external can anchor the offset"
+
+rm -f "$position_state"
+OMARCHY_TEST_EXTRA_EXTERNALS="$(twin HDMI-A-2 3840),$(unique 5760)" dock
+[[ $(sed -n 1p "$position_state") == "-5760x0" ]] || fail "clamshell disable anchors on the external that has no twin"
+: >"$eval_log"
+OMARCHY_TEST_EXTRA_EXTERNALS="$(twin HDMI-A-1 1920),$(unique 2500)" OMARCHY_TEST_EXTERNAL_NAME=HDMI-A-2 undock
+grep -F 'position = "-3260x0"' "$eval_log" >/dev/null || fail "undock follows the external with no twin even when the twins swap connectors"
+pass "undock anchors on the external that has no twin, whichever connectors the twins use"
 
 # A serial names the physical monitor, so a resolution change is still the same desk.
 remember_position "-1920x0"

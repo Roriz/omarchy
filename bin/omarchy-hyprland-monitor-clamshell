@@ -149,7 +149,12 @@ EXTERNALS_JQ='
        elif $kind != "" then "\($kind):\(.width)x\(.height)"
        else "\(.name):\(.width)x\(.height)" end
        | gsub("[^A-Za-z0-9._:-]"; "_"));
-  def anchor: externals | sort_by([identity, .name]) | .[0];
+  # Only an identity no other external shares can anchor: two that look alike
+  # may swap connectors while docked, and the offset would follow the wrong one.
+  def anchor:
+    externals as $all
+    | [$all[] | identity as $id | select([$all[] | identity | select(. == $id)] | length == 1)]
+    | sort_by(identity) | .[0];
 '
 
 current_external_layout() {
@@ -163,7 +168,8 @@ current_external_layout() {
 # them over to fill its place -- so an absolute position cannot be put back.
 # What survives is where the panel sat relative to an external, captured before
 # the panel goes down, the same way current_internal_scale captures the scale.
-# The anchor is the first external by identity, the same one on both sides.
+# The anchor is the first external whose identity is its own, the same one on
+# both sides; with none, there is nothing to measure from and nothing is saved.
 current_internal_offset() {
   [[ -n $INTERNAL ]] || return 0
   hyprctl monitors all -j | jq -r --arg internal "$INTERNAL" "$EXTERNALS_JQ"'
