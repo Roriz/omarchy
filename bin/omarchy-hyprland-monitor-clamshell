@@ -145,12 +145,19 @@ current_internal_position() {
   hyprctl monitors all -j | jq -r --arg internal "$INTERNAL" '.[] | select(.name == $internal and .disabled != true) | "\(.x)x\(.y)"' | head -1
 }
 
-# The enabled outputs other than the panel, by name and size. A position is
-# only meaningful next to the monitors it was captured beside, so this is what
-# tells a return to the same desk from a different one. Their own positions are
+# The enabled outputs other than the panel, by make, model, serial and size. A
+# position is only meaningful next to the monitors it was captured beside, so
+# this is what tells a return to the same desk from a different one. The EDID
+# identity follows the physical monitor across ports and docks; the connector
+# name stands in only for a monitor that reports none. Their own positions are
 # left out: the compositor rearranges them when the panel goes down.
 current_external_layout() {
-  hyprctl monitors all -j | jq -r '[.[] | select(.name | test("^(eDP|LVDS|DSI)-") | not) | select(.disabled != true) | "\(.name):\(.width)x\(.height)"] | sort | join(",")'
+  hyprctl monitors all -j | jq -r '[.[]
+    | select(.name | test("^(eDP|LVDS|DSI)-") | not)
+    | select(.disabled != true)
+    | ([.make, .model, .serial] | map(select(. != null and . != "")) | join(" ")) as $identity
+    | "\(if $identity == "" then .name else $identity end | gsub("[^A-Za-z0-9._-]"; "_")):\(.width)x\(.height)"]
+    | sort | join(",")'
 }
 
 # Line one is the position, line two the external layout it belongs to.
