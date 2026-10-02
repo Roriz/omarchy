@@ -181,45 +181,35 @@ current_internal_position() {
   hyprctl monitors all -j | jq -r --arg internal "$INTERNAL" '.[] | select(.name == $internal and .disabled != true) | "\(.x)x\(.y)"' | head -1
 }
 
-# Whether a panel at $1 with the given logical size would sit on top of an
-# enabled external. Sizes are in layout pixels: the mode divided by the scale,
-# with width and height swapped for a transform that rotates by a quarter turn.
-position_overlaps_external() {
-  local position="$1" width="$2" height="$3"
+# Whether the panel, put at $1, would stay clear of every enabled external.
+# $2 is the scale to measure it at, when it is not the panel's current one.
+# Sizes are in layout pixels: the mode divided by the scale, with width and
+# height swapped for a transform that rotates by a quarter turn.
+internal_fits_at() {
+  [[ -n $INTERNAL ]] || return 1
 
-  hyprctl monitors all -j | jq -e --arg position "$position" --argjson width "$width" --argjson height "$height" '
-    ($position | split("x") | map(tonumber)) as [$x, $y]
-    | [.[]
-      | select(.name | test("^(eDP|LVDS|DSI)-") | not)
-      | select(.disabled != true)
-      | (if (.transform // 0) % 2 == 1 then [.height, .width] else [.width, .height] end) as [$w, $h]
-      | select($x < .x + $w / .scale and .x < $x + $width and $y < .y + $h / .scale and .y < $y + $height)]
-    | length > 0' >/dev/null
-}
-
-# $1 is the scale to measure at, when it is not the panel's current one.
-current_internal_logical_size() {
-  [[ -n $INTERNAL ]] || return 0
-  hyprctl monitors all -j | jq -r --arg internal "$INTERNAL" --argjson scale "${1:-null}" '.[] | select(.name == $internal and .disabled != true)
-    | (if (.transform // 0) % 2 == 1 then [.height, .width] else [.width, .height] end) as [$w, $h]
-    | (if $scale then $scale else .scale end) as $s
-    | "\($w / $s) \($h / $s)"' | head -1
+  hyprctl monitors all -j | jq -e --arg internal "$INTERNAL" --arg position "$1" --argjson scale "${2:-null}" "$EXTERNALS_JQ"'
+    def size: if (.transform // 0) % 2 == 1 then [.height, .width] else [.width, .height] end;
+    . as $all
+    | ($position | split("x") | map(tonumber)) as [$x, $y]
+    | ([$all[] | select(.name == $internal and .disabled != true)] | .[0]) as $panel
+    | $panel != null
+    and ($panel | size as [$pw, $ph] | (if $scale then $scale else $panel.scale end) as $s
+      | [$all | externals[] | size as [$w, $h]
+        | select($x < .x + $w / .scale and .x < $x + $pw / $s and $y < .y + $h / .scale and .y < $y + $ph / $s)]
+      | length == 0)' >/dev/null 2>&1
 }
 
 # Line one is the panel's offset from the anchor external, line two the external
 # layout it belongs to.
-store_internal_offset() {
-  local offset="$1" layout="$2"
+remember_internal_position() {
+  local offset layout
+  offset=$(current_internal_offset)
+  layout=$(current_external_layout)
   valid_position "$offset" && valid_layout "$layout" || return 0
 
   mkdir -p "$TOGGLES_DIR"
   printf '%s\n%s\n' "$offset" "$layout" >"$POSITION_STATE"
-}
-
-remember_internal_position() {
-  local offset
-  offset=$(current_internal_offset)
-  store_internal_offset "$offset" "$(current_external_layout)"
 }
 
 # $1 is the configured scale when the caller has already read it, so one sync
@@ -260,10 +250,14 @@ read_monitor_position() {
   echo auto
 }
 
+apply_internal_output() {
+  hyprctl eval "hl.monitor({ output = \"$INTERNAL\", mode = \"preferred\", position = \"$1\", scale = $2 })" >/dev/null 2>&1 || true
+}
+
 enable_internal_output() {
   [[ -n $INTERNAL ]] || return 0
   local scale="${1:-}"
-  local position width height
+  local position
   [[ -n $scale ]] || scale=$(read_monitor_scale)
   position=$(read_monitor_position)
   # A panel that is already on holds a place of its own. Re-applying it with
@@ -273,15 +267,9 @@ enable_internal_output() {
   # "auto" is the safer place.
   if [[ $position == "auto" ]]; then
     position=$(current_internal_position)
-    valid_position "$position" || position=auto
-    if [[ $position != "auto" ]]; then
-      read -r width height <<<"$(current_internal_logical_size "$scale")"
-      if [[ -z $width ]] || position_overlaps_external "$position" "$width" "$height"; then
-        position=auto
-      fi
-    fi
+    internal_fits_at "$position" "$scale" || position=auto
   fi
-  hyprctl eval "hl.monitor({ output = \"$INTERNAL\", mode = \"preferred\", position = \"$position\", scale = $scale })" >/dev/null 2>&1 || true
+  apply_internal_output "$position" "$scale"
 }
 
 sync_internal_scale() {
@@ -317,7 +305,7 @@ sync_internal_scale() {
 restore_internal_position() {
   [[ -n $INTERNAL && -f $POSITION_STATE ]] || return 0
 
-  local offset layout anchor position scale width height
+  local offset layout anchor position scale
   { read -r offset; read -r layout; } <"$POSITION_STATE" || true
   rm -f "$POSITION_STATE"
 
@@ -332,13 +320,11 @@ restore_internal_position() {
 
   # The externals may have been rearranged since the offset was captured, so a
   # place that was free then can be taken now.
-  read -r width height <<<"$(current_internal_logical_size)"
-  [[ -n $width && -n $height ]] || return 0
-  ! position_overlaps_external "$position" "$width" "$height" || return 0
+  internal_fits_at "$position" || return 0
 
   scale=$(current_internal_scale)
   valid_scale "$scale" || scale=$(read_monitor_scale)
-  hyprctl eval "hl.monitor({ output = \"$INTERNAL\", mode = \"preferred\", position = \"$position\", scale = $scale })" >/dev/null 2>&1 || true
+  apply_internal_output "$position" "$scale"
 }
 
 dpms_internal() {
