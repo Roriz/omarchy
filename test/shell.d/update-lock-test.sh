@@ -111,12 +111,14 @@ pass "omarchy-update prevents overlapping top-level updates"
 # would otherwise leave the inhibitor holding the flock forever, blocking every
 # later update and silencing omarchy-migrate-notify, which reads the same lock.
 inhibit_pid_file="$test_tmp/inhibit-pid"
+inhibit_args_log="$test_tmp/inhibit-args.log"
 keyring_marker="$test_tmp/keyring-started"
 write_stub omarchy-snapshot 'exit 0'
-write_stub systemd-inhibit '[[ -z ${INHIBIT_PID_FILE:-} ]] || echo "$$" >"$INHIBIT_PID_FILE"; while [[ $1 == --* ]]; do shift; done; exec "$@"'
+: >"$inhibit_args_log"
+write_stub systemd-inhibit '[[ -z ${INHIBIT_ARGS_LOG:-} ]] || printf "%s\n" "$*" >>"$INHIBIT_ARGS_LOG"; [[ -z ${INHIBIT_PID_FILE:-} ]] || echo "$$" >"$INHIBIT_PID_FILE"; while [[ $1 == --* ]]; do shift; done; exec "$@"'
 write_stub omarchy-update-keyring 'echo started >"$TEST_MARKER"; sleep 3; exit 0'
 
-OMARCHY_UPDATE_LOGGED=1 TEST_MARKER="$keyring_marker" INHIBIT_PID_FILE="$inhibit_pid_file" \
+OMARCHY_UPDATE_LOGGED=1 TEST_MARKER="$keyring_marker" INHIBIT_PID_FILE="$inhibit_pid_file" INHIBIT_ARGS_LOG="$inhibit_args_log" \
   run_with_lock_env "$SUDO_TEST_ROOT/bin/omarchy-update" -y >"$test_tmp/update-inhibit.out" 2>&1 &
 inhibit_update_pid=$!
 
@@ -128,6 +130,15 @@ done
 
 inhibitor_pid=$(<"$inhibit_pid_file")
 kill -0 "$inhibitor_pid" 2>/dev/null || fail "sleep inhibitor is still running when its descriptors are inspected"
+
+# logind ignores high-level sleep locks for the lid switch
+# (LidSwitchIgnoreInhibited defaults to yes), so the inhibitor has to take the
+# low-level handle-lid-switch lock too or closing the lid suspends mid-update.
+# Assert the mask the launcher actually built, through the real update flow,
+# rather than the shape of the code around it.
+grep -q -- '--what=sleep:idle:handle-lid-switch' "$inhibit_args_log" ||
+  fail "update inhibitor blocks the lid switch" "$(cat "$inhibit_args_log")"
+pass "update inhibitor blocks the lid switch during updates"
 
 lock_target=$(readlink -f "$runtime_dir/$update_lock_name")
 inhibitor_holds_lock=0
@@ -174,14 +185,6 @@ SH
   [[ ! -e $pkexec_marker ]] || fail "terminal sleep inhibition does not use pkexec"
   run_with_lock_env "$SUDO_TEST_ROOT/bin/omarchy-update-stay-awake" stop
   pass "terminal updates use sudo instead of Polkit for sleep inhibition"
-
-  # The sudo stub logs the whole systemd-inhibit argv, which is the only place
-  # the inhibitor's --what mask is observable. sleep and idle are high-level
-  # locks that logind ignores for the lid switch by default, so without
-  # handle-lid-switch closing the lid suspends the machine mid-update.
-  grep -q -- '--what=sleep:idle:handle-lid-switch' "$sudo_log" ||
-    fail "update sleep inhibition covers the lid switch"
-  pass "update sleep inhibition covers the lid switch"
 
   wait_for_process_exit() {
     local process_pid="$1"
