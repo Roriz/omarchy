@@ -333,10 +333,11 @@ pass "clamshell recovery uses remembered internal scale"
 
 # Docking with the lid shut turns the panel off, and the compositor slides the
 # externals over to fill its place. What the layout keeps is where the panel sat
-# relative to an external, so that is what gets remembered. Every case below uses
-# the layout measured on a real machine: panel at 0, external at 1920 while both
-# are on (offset -1920), then the external at 0 and the panel back at 1920 once
-# the undock's reload has re-enabled it with "auto".
+# relative to an external, so that is what gets remembered. Every case below
+# follows the shape of the layout measured on a real machine, with a 1920-wide
+# panel: panel at 0, external at 1920 while both are on (offset -1920), then the
+# external at 0 and the panel at 1920 once the undock's reload has re-enabled it
+# with "auto".
 dock() {
   OMARCHY_TEST_INTERNAL_X="${OMARCHY_TEST_INTERNAL_X:-0}" OMARCHY_TEST_EXTERNAL_ACTIVE=true OMARCHY_TEST_CLAMSHELL=true run_clamshell
 }
