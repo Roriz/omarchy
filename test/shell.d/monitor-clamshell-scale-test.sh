@@ -42,11 +42,16 @@ if [[ $1 == "monitors" && $2 == "all" && $3 == "-j" ]]; then
   if [[ ${OMARCHY_TEST_INTERNAL_DISABLED:-false} == "true" && ! -f $OMARCHY_TEST_RELOADED ]]; then
     printf '[%s,{"name":"eDP-1","disabled":true,"scale":null,"x":null,"y":null}]' "$external"
   else
+    scale="${OMARCHY_TEST_INTERNAL_SCALE:-2}"
+    if [[ -n ${OMARCHY_TEST_APPLIED_SCALE:-} && -f $OMARCHY_TEST_APPLIED_MARKER ]]; then
+      scale="$OMARCHY_TEST_APPLIED_SCALE"
+    fi
     printf '[%s,{"name":"eDP-1","disabled":false,"scale":%s,"refreshRate":60,"transform":0,"width":1920,"height":1080,"x":%s,"y":%s}]' \
-      "$external" "${OMARCHY_TEST_INTERNAL_SCALE:-2}" "${OMARCHY_TEST_INTERNAL_X:-0}" "${OMARCHY_TEST_INTERNAL_Y:-0}"
+      "$external" "$scale" "${OMARCHY_TEST_INTERNAL_X:-0}" "${OMARCHY_TEST_INTERNAL_Y:-0}"
   fi
 elif [[ $1 == "eval" ]]; then
   printf '%s\n' "$2" >>"$OMARCHY_TEST_HYPRCTL_EVAL_LOG"
+  [[ -z ${OMARCHY_TEST_APPLIED_SCALE:-} ]] || touch "$OMARCHY_TEST_APPLIED_MARKER"
 elif [[ $1 == "reload" ]]; then
   printf 'reload\n' >>"$OMARCHY_TEST_HYPRCTL_EVAL_LOG"
   [[ -f $HOME/.local/state/omarchy/toggles/hypr/internal-monitor-clamshell.lua ]] || touch "$OMARCHY_TEST_RELOADED"
@@ -273,7 +278,9 @@ run_clamshell() {
     printf 'hl.monitor({ output = "eDP-1", disabled = true })\n' >"$clamshell_flag"
   fi
 
+  rm -f "$test_tmp/applied-scale"
   HOME="$home_dir" \
+    OMARCHY_TEST_APPLIED_MARKER="$test_tmp/applied-scale" \
     OMARCHY_TEST_RELOADED="$reloaded_marker" \
     OMARCHY_TEST_EXTERNAL_NAME="${OMARCHY_TEST_EXTERNAL_NAME:-HDMI-A-1}" \
     OMARCHY_TEST_EXTERNAL_MAKE="${OMARCHY_TEST_EXTERNAL_MAKE-Samsung Electric Company}" \
@@ -774,6 +781,27 @@ grep -F 'position = "auto"' "$eval_log" >/dev/null || fail "a scale correction t
 OMARCHY_TEST_INTERNAL_SCALE=3 OMARCHY_TEST_INTERNAL_X=0 OMARCHY_TEST_EXTERNAL_X=1400 run_clamshell
 grep -F 'position = "0x0"' "$eval_log" >/dev/null || fail "a scale correction that still fits keeps the position"
 pass "a scale correction falls back to auto when the wider panel would overlap"
+
+# Hyprland can snap a requested scale down, growing the panel beyond the fit
+# predicted from that request. Check the geometry it actually applied too.
+printf '%s\n' 'hl.monitor({ output = "", scale = 1.669, position = "auto" })' >"$monitor_lua"
+for external_x in 1151 1152; do
+  : >"$eval_log"
+  OMARCHY_TEST_INTERNAL_SCALE=3 OMARCHY_TEST_APPLIED_SCALE=1.6666666 \
+    OMARCHY_TEST_INTERNAL_X=0 OMARCHY_TEST_EXTERNAL_X="$external_x" run_clamshell
+  lua - "$eval_log" "$external_x" <<'LUA'
+local rules = {}
+hl = {
+  get_monitor = function() return { width = 1920, height = 1080, refresh_rate = 60, transform = 0 } end,
+  monitor = function(rule) rules[#rules + 1] = rule end,
+}
+dofile(arg[1])
+local final = assert(rules[#rules], "scale correction must emit a panel rule")
+local expected = arg[2] == "1151" and "auto" or "0x0"
+assert(final.position == expected, "snapped scale must fit at the final position")
+LUA
+done
+pass "scale correction checks the applied scale and allows touching edges without overlap"
 
 # Regression: specific-output rule referencing the omarchy_monitor_scale
 # variable must resolve to the variable's value, not fall back to the default.

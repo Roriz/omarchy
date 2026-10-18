@@ -331,7 +331,7 @@ apply_internal_output() {
 enable_internal_output() {
   [[ -n $INTERNAL ]] || return 0
   local scale="${1:-}"
-  local position
+  local position preserve_position=0
   [[ -n $scale ]] || scale=$(read_monitor_scale)
   position=$(read_monitor_position)
   # A panel that is already on holds a place of its own. Re-applying it with
@@ -341,9 +341,18 @@ enable_internal_output() {
   # "auto" is the safer place.
   if [[ $position == "auto" ]]; then
     position=$(current_internal_position)
-    internal_fits_at "$position" "$scale" || position=auto
+    if internal_fits_at "$position" "$scale"; then
+      preserve_position=1
+    else
+      position=auto
+    fi
   fi
   apply_internal_output "$position" "$scale"
+  # A requested scale can snap to a smaller value and grow the panel. Check
+  # the compositor's applied geometry instead of duplicating its scale rules.
+  if (( preserve_position )) && ! internal_fits_at "$position"; then
+    apply_internal_output auto "$scale"
+  fi
 }
 
 sync_internal_scale() {
