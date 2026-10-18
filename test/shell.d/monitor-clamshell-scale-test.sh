@@ -359,8 +359,10 @@ undock() {
 
 write_default_auto_config
 rm -f "$position_state"
-dock
+(umask 022; dock)
 [[ -f $position_state ]] || fail "clamshell disable remembers internal position"
+[[ $(stat -c '%a' "$position_state") == "600" ]] || fail "saved monitor config is private regardless of the caller's umask"
+pass "saved monitor config is private regardless of the caller's umask"
 [[ $(sed -n 1p "$position_state") == "-1920x0" ]] || fail "clamshell disable remembers the panel's offset from the external"
 [[ $(sed -n 2p "$position_state") == "Samsung_Electric_Company_LF24T35_HX5X721467" ]] || fail "clamshell disable remembers the external layout beside it"
 pass "clamshell disable remembers the panel's offset and the external layout"

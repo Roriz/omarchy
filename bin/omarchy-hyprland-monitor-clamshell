@@ -215,15 +215,19 @@ internal_fits_at() {
 # The offset, external identities and geometry all belong to one dock cycle.
 remember_internal_position() {
   local snapshot=()
+  local temporary
   mapfile -t snapshot < <(current_position_snapshot)
   (( ${#snapshot[@]} == 5 )) || return 0
   valid_position "${snapshot[0]}" && valid_layout "${snapshot[1]}" || return 0
 
   mkdir -p "$TOGGLES_DIR"
-  {
+  temporary=$(mktemp "$TOGGLES_DIR/.internal-monitor-position.XXXXXX") || return 0
+  if ! {
     printf '%s\n' "${snapshot[@]:0:4}"
     cat "$MONITOR_LUA"
-  } >"$POSITION_STATE"
+  } >"$temporary" || ! mv "$temporary" "$POSITION_STATE"; then
+    rm -f "$temporary"
+  fi
 }
 
 # Save the whole arrangement before applying any rule: positioning the panel
