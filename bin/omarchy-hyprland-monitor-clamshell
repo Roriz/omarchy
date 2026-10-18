@@ -196,7 +196,9 @@ current_internal_position() {
 # Whether the panel, put at $1, would stay clear of every enabled external.
 # $2 is the scale to measure it at, when it is not the panel's current one.
 # Sizes are in layout pixels: the mode divided by the scale, with width and
-# height swapped for a transform that rotates by a quarter turn.
+# height swapped for a transform that rotates by a quarter turn. A live scale is
+# rounded, since 5/3 is reported as a float a hair past the edge; a requested
+# one is not, since Hyprland may still snap it larger.
 internal_fits_at() {
   [[ -n $INTERNAL ]] || return 1
 
@@ -206,9 +208,10 @@ internal_fits_at() {
     | ($position | split("x") | map(tonumber)) as [$x, $y]
     | ([$all[] | select(.name == $internal and .disabled != true)] | .[0]) as $panel
     | $panel != null
-    and ($panel | size as [$pw, $ph] | (if $scale then $scale else $panel.scale end) as $s
+    and ($panel | size
+      | if $scale then map(. / $scale) else map(. / $panel.scale | round) end as [$pw, $ph]
       | [$all | externals[] | size as [$w, $h]
-        | select($x < .x + $w / .scale and .x < $x + $pw / $s and $y < .y + $h / .scale and .y < $y + $ph / $s)]
+        | select($x < .x + ($w / .scale | round) and .x < $x + $pw and $y < .y + ($h / .scale | round) and .y < $y + $ph)]
       | length == 0)' >/dev/null 2>&1
 }
 

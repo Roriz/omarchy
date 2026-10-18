@@ -620,6 +620,16 @@ OMARCHY_TEST_INTERNAL_Y=-1080 undock
 grep -F 'position = "-1920x-1080"' "$eval_log" >/dev/null || fail "undock restores a remembered negative offset"
 pass "clamshell disable/undock round-trips a negative offset"
 
+# 5/3 is reported as 1.6666666, which makes a 1920-wide panel a hair wider than
+# its 1152 layout pixels, so a panel flush against the external must still fit.
+write_default_auto_config
+rm -f "$position_state"
+OMARCHY_TEST_INTERNAL_SCALE=1.6666666 OMARCHY_TEST_EXTERNAL_X=1152 dock
+: >"$eval_log"
+OMARCHY_TEST_INTERNAL_SCALE=1.6666666 undock
+grep -F 'position = "-1152x0"' "$eval_log" >/dev/null || fail "undock restores a panel flush against the external at a fractional scale"
+pass "undock restores a panel flush against the external at a fractional scale"
+
 remember_position "-01920x-08"
 : >"$eval_log"
 undock
