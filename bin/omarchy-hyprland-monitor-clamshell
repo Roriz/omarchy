@@ -8,7 +8,14 @@ CLAMSHELL_FLAG="$TOGGLES_DIR/internal-monitor-clamshell.lua"
 MANUAL_DISABLE_FLAG="$TOGGLES_DIR/internal-monitor-disable.lua"
 SCALE_STATE="$TOGGLES_DIR/internal-monitor-scale"
 POSITION_STATE="$TOGGLES_DIR/internal-monitor-position"
+POSITION_FLAG="$TOGGLES_DIR/internal-monitor-position.lua"
 MONITOR_LUA="$HOME/.config/hypr/monitors.lua"
+
+# Lid bindings, wake recovery and the watcher can reconcile at the same time.
+# Lock here so every caller shares the same capture/reload/restore transaction.
+mkdir -p "$TOGGLES_DIR"
+exec 8>"$TOGGLES_DIR/internal-monitor-clamshell.lock"
+flock 8
 
 INTERNAL=$(omarchy-hyprland-monitor-laptop)
 
@@ -161,6 +168,16 @@ current_external_layout() {
   hyprctl monitors all -j | jq -r "$EXTERNALS_JQ"'[externals[] | identity] | sort | join(",")'
 }
 
+# Include geometry separately from identity: a serial still names the same
+# screen after a mode change, but the old offset may now leave a gap or overlap.
+# Coordinates are relative to the anchor so a translated desk still matches.
+current_external_geometry() {
+  hyprctl monitors all -j | jq -r "$EXTERNALS_JQ"'
+    anchor as $anchor | select($anchor != null)
+    | [externals[] | [identity, .width, .height, .scale, (.transform // 0),
+      (.x - $anchor.x), (.y - $anchor.y)] | map(tostring) | join(":")] | sort | join(",")'
+}
+
 # "auto" is order-dependent, not identity-based: it appends a panel after
 # whatever else is already positioned, so leaving clamshell can put the panel
 # on the wrong side of a monitor that stayed up the whole time. And the
@@ -187,6 +204,12 @@ current_internal_position() {
   hyprctl monitors all -j | jq -r --arg internal "$INTERNAL" '.[] | select(.name == $internal and .disabled != true) | "\(.x)x\(.y)"' | head -1
 }
 
+current_internal_geometry() {
+  hyprctl monitors all -j | jq -r --arg internal "$INTERNAL" '
+    .[] | select(.name == $internal and .disabled != true)
+    | [.width, .height, .scale, (.transform // 0)] | map(tostring) | join(":")'
+}
+
 # Whether the panel, put at $1, would stay clear of every enabled external.
 # $2 is the scale to measure it at, when it is not the panel's current one.
 # Sizes are in layout pixels: the mode divided by the scale, with width and
@@ -206,16 +229,78 @@ internal_fits_at() {
       | length == 0)' >/dev/null 2>&1
 }
 
-# Line one is the panel's offset from the anchor external, line two the external
-# layout it belongs to.
+# The offset, external identities and geometry all belong to one dock cycle.
 remember_internal_position() {
-  local offset layout
+  local offset layout geometry panel
   offset=$(current_internal_offset)
   layout=$(current_external_layout)
+  geometry=$(current_external_geometry)
+  panel=$(current_internal_geometry)
   valid_position "$offset" && valid_layout "$layout" || return 0
 
   mkdir -p "$TOGGLES_DIR"
-  printf '%s\n%s\n' "$offset" "$layout" >"$POSITION_STATE"
+  printf '%s\n%s\n%s\n%s\n' "$offset" "$layout" "$geometry" "$panel" >"$POSITION_STATE"
+}
+
+# A runtime eval is lost on reload. Keep a guarded rule in the toggle directory
+# too, and retire it as soon as config, monitor identity or geometry changes.
+# Only validated connector names and numeric fields are emitted as Lua.
+persist_internal_position() {
+  local position="$1" scale="$2" checksum monitors temporary
+  valid_position "$position" && valid_scale "$scale" || return 0
+  checksum=$(cksum <"$MONITOR_LUA" 2>/dev/null) || return 0
+  [[ $checksum =~ ^[0-9]+[[:space:]][0-9]+$ ]] || return 0
+  monitors=$(hyprctl monitors all -j | jq -er --arg internal "$INTERNAL" --argjson scale "$scale" --arg position "$position" '
+    [.[] | select(.disabled != true)]
+    | if length > 1 and all(.[];
+        (.name | test("^[A-Za-z0-9._-]+$")) and
+        all(.width, .height, .scale, (.transform // 0), .x, .y; type == "number"))
+      then ($position | split("x") | map(tonumber)) as [$x, $y]
+      | map(if .name == $internal then .scale = $scale | .x = $x | .y = $y else . end)
+      | map("  { name = \"\(.name)\", serial = \"\((.serial // "") | gsub("[^A-Za-z0-9._:-]"; "_"))\", " +
+        "description = \"\((.description // "") | gsub("[^A-Za-z0-9._:-]"; "_"))\", " +
+        "width = \(.width), height = \(.height), scale = \(.scale), " +
+        "transform = \(.transform // 0), x = \(.x), y = \(.y) },") | join("\n")
+      else error("unusable monitor geometry") end') || return 0
+
+  temporary=$(mktemp "$TOGGLES_DIR/.internal-monitor-position.XXXXXX") || return 0
+  cat >"$temporary" <<LUA
+-- Remembered clamshell position; discard when the desk or monitor config changes.
+local dir = os.getenv("HOME") .. "/.local/state/omarchy/toggles/hypr/"
+local function discard()
+  os.remove(dir .. "internal-monitor-position.lua")
+end
+for _, flag in ipairs({ "internal-monitor-clamshell", "internal-monitor-disable", "internal-monitor-mirror" }) do
+  local file = io.open(dir .. flag .. ".lua")
+  if file then
+    file:close()
+    return discard()
+  end
+end
+local check = io.popen('cksum < "\$HOME/.config/hypr/monitors.lua" 2>/dev/null')
+local checksum = check and check:read("*l")
+if check then check:close() end
+if checksum ~= "$checksum" then return discard() end
+local expected = {
+$monitors
+}
+local actual = hl.get_monitors()
+if #actual ~= #expected then return discard() end
+for _, saved in ipairs(expected) do
+  local monitor = hl.get_monitor(saved.name)
+  if not monitor or (monitor.serial or ""):gsub("[^A-Za-z0-9._:-]", "_") ~= saved.serial then return discard() end
+  if (monitor.description or ""):gsub("[^A-Za-z0-9._:-]", "_") ~= saved.description then return discard() end
+  -- IPC rounds fractional scales; Lua exposes the compositor's full float.
+  if math.abs(monitor.scale - saved.scale) >= 0.001 then return discard() end
+  for _, key in ipairs({ "width", "height", "transform", "x", "y" }) do
+    if monitor[key] ~= saved[key] then return discard() end
+  end
+end
+local panel = hl.get_monitor("$INTERNAL")
+hl.monitor({ output = "$INTERNAL", position = "$position", scale = $scale,
+  mode = string.format("%dx%d@%.5f", panel.width, panel.height, panel.refresh_rate), transform = panel.transform })
+LUA
+  mv "$temporary" "$POSITION_FLAG"
 }
 
 # $1 is the configured scale when the caller has already read it, so one sync
@@ -257,13 +342,18 @@ read_monitor_position() {
 }
 
 apply_internal_output() {
-  hyprctl eval "hl.monitor({ output = \"$INTERNAL\", mode = \"preferred\", position = \"$1\", scale = $2 })" >/dev/null 2>&1 || true
+  # A new per-output rule does not inherit the catch-all's mode or transform.
+  # Carry the enabled panel's values so the fit check measures what we apply.
+  hyprctl eval "local panel = hl.get_monitor(\"$INTERNAL\")
+    hl.monitor({ output = \"$INTERNAL\", position = \"$1\", scale = $2,
+      mode = panel and string.format(\"%dx%d@%.5f\", panel.width, panel.height, panel.refresh_rate),
+      transform = panel and panel.transform })" >/dev/null 2>&1 || true
 }
 
 enable_internal_output() {
   [[ -n $INTERNAL ]] || return 0
   local scale="${1:-}"
-  local position
+  local position persist=0
   [[ -n $scale ]] || scale=$(read_monitor_scale)
   position=$(read_monitor_position)
   # A panel that is already on holds a place of its own. Re-applying it with
@@ -275,7 +365,14 @@ enable_internal_output() {
     position=$(current_internal_position)
     internal_fits_at "$position" "$scale" || position=auto
   fi
+  if [[ -f $POSITION_FLAG ]]; then
+    rm -f "$POSITION_FLAG"
+    persist=1
+  fi
   apply_internal_output "$position" "$scale"
+  if (( persist )); then
+    persist_internal_position "$position" "$scale"
+  fi
 }
 
 sync_internal_scale() {
@@ -311,26 +408,32 @@ sync_internal_scale() {
 restore_internal_position() {
   [[ -n $INTERNAL && -f $POSITION_STATE ]] || return 0
 
-  local offset layout anchor position scale
-  { read -r offset; read -r layout; } <"$POSITION_STATE" || true
+  local offset layout geometry panel anchor position scale
+  { read -r offset; read -r layout; read -r geometry; read -r panel; } <"$POSITION_STATE" || true
   rm -f "$POSITION_STATE"
 
   valid_position "$offset" && valid_layout "$layout" || return 0
   [[ $layout == "$(current_external_layout)" ]] || return 0
+  [[ -n $geometry && $geometry == "$(current_external_geometry)" ]] || return 0
+  [[ -n $panel && $panel == "$(current_internal_geometry)" ]] || return 0
   [[ $(read_monitor_position) == "auto" ]] || return 0
 
   anchor=$(current_anchor_position)
   valid_position "$anchor" || return 0
-  position="$(( ${anchor%x*} + ${offset%x*} ))x$(( ${anchor#*x} + ${offset#*x} ))"
-  [[ $position == "$(current_internal_position)" ]] && return 0
-
+  position=$(jq -nr --arg anchor "$anchor" --arg offset "$offset" '
+    [$anchor, $offset] | map(split("x") | map(tonumber))
+    | "\(.[0][0] + .[1][0])x\(.[0][1] + .[1][1])"')
+  valid_position "$position" || return 0
   # The externals may have been rearranged since the offset was captured, so a
   # place that was free then can be taken now.
   internal_fits_at "$position" || return 0
 
   scale=$(current_internal_scale)
   valid_scale "$scale" || scale=$(read_monitor_scale)
-  apply_internal_output "$position" "$scale"
+  if [[ $position != "$(current_internal_position)" ]]; then
+    apply_internal_output "$position" "$scale"
+  fi
+  persist_internal_position "$position" "$scale"
 }
 
 dpms_internal() {
@@ -344,7 +447,7 @@ enable_internal() {
   local changed=0
 
   if [[ -f $CLAMSHELL_FLAG ]]; then
-    rm -f "$CLAMSHELL_FLAG"
+    rm -f "$CLAMSHELL_FLAG" "$POSITION_FLAG"
     changed=1
   fi
 
@@ -373,6 +476,7 @@ disable_internal() {
   config=$(printf 'hl.monitor({ output = "%s", disabled = true })' "$INTERNAL")
 
   if [[ ! -f $CLAMSHELL_FLAG ]] || [[ $(< "$CLAMSHELL_FLAG") != $config ]]; then
+    rm -f "$POSITION_FLAG"
     printf '%s\n' "$config" >"$CLAMSHELL_FLAG"
     hyprctl reload >/dev/null 2>&1 || true
   fi

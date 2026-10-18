@@ -4,6 +4,8 @@ set -euo pipefail
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
+require_command lua
+
 test_tmp=$(mktemp -d)
 trap 'rm -rf "$test_tmp"' EXIT
 
@@ -16,6 +18,7 @@ clamshell_flag="$home_dir/.local/state/omarchy/toggles/hypr/internal-monitor-cla
 state_dir="$home_dir/.local/state/omarchy/toggles/hypr"
 scale_state="$state_dir/internal-monitor-scale"
 position_state="$state_dir/internal-monitor-position"
+position_flag="$state_dir/internal-monitor-position.lua"
 manual_disable_flag="$state_dir/internal-monitor-disable.lua"
 
 mkdir -p "$stub_bin" "$home_dir/.config/hypr"
@@ -251,7 +254,9 @@ remember_scale() {
 
 remember_position() {
   mkdir -p "$state_dir"
-  printf '%s\n%s\n' "$1" "${2:-Samsung_Electric_Company_LF24T35_HX5X721467}" >"$position_state"
+  local layout="${2:-Samsung_Electric_Company_LF24T35_HX5X721467}"
+  local geometry="${3:-$layout:1920:1080:1:0:0:0}"
+  printf '%s\n%s\n%s\n%s\n' "$1" "$layout" "$geometry" "${4:-1920:1080:${OMARCHY_TEST_INTERNAL_SCALE:-2}:0}" >"$position_state"
 }
 
 # OMARCHY_TEST_UNDOCK=true starts from a docked state: the clamshell flag is set
@@ -364,9 +369,109 @@ grep -F 'scale = 2' "$eval_log" >/dev/null || fail "undock restore keeps the pan
 [[ ! -f $position_state ]] || fail "undock spends the remembered offset"
 pass "undock restores the panel beside the external under the stock auto config"
 
+# Runtime monitor rules disappear on reload. The restore must also be loaded
+# from the toggle directory, including when a second reconciler reloads.
+[[ -f $position_flag ]] || fail "undock persists the restored position for future reloads"
+pass "undock persists the restored position for future reloads"
+
+# Execute the generated Lua as a reload would, with the post-undock monitors.
+# Changing the compositor state below must invalidate and delete the rule.
+reload_position_flag() {
+  HOME="$home_dir" lua - "$position_flag" >>"$eval_log" <<'LUA'
+local panel = { name = "eDP-1", serial = "", width = 1920, height = 1080, scale = 2, refresh_rate = 60, transform = 0, x = -1920, y = 0 }
+local external = { name = "HDMI-A-1", serial = "HX5X721467", width = 1920, height = 1080, scale = 1, transform = 0, x = 0, y = 0 }
+local change = os.getenv("OMARCHY_TEST_RELOAD_CHANGE")
+if change == "identity" then external.serial = "OTHER" end
+if change == "size" then external.width = 3840 end
+if change == "scale" then external.scale = 2 end
+if change == "rotation" then external.transform = 1 end
+if change == "position" then external.x = 500 end
+if change == "panel" then panel.width = 2560 end
+if change == "panel-position" then panel.x = 0 end
+if change == "rounding" then panel.scale = 2.00000002 end
+local monitors = change == "removed" and { panel } or { panel, external }
+hl = {
+  get_monitors = function() return monitors end,
+  get_monitor = function(name)
+    for _, monitor in ipairs(monitors) do
+      if monitor.name == name then return monitor end
+    end
+  end,
+  monitor = function(rule)
+    assert(rule.mode == "1920x1080@60.00000" and rule.transform == 0, "reload preserves the panel mode and transform")
+    print('position = "' .. rule.position .. '"')
+  end,
+}
+dofile(arg[1])
+LUA
+}
+
+: >"$eval_log"
+reload_position_flag
+reload_position_flag
+[[ $(grep -c 'position = "-1920x0"' "$eval_log") == "2" ]] || fail "every reload reapplies the restored position"
+[[ -f $position_flag ]] || fail "a matching layout retains its position rule"
+pass "the restored position survives repeated config reloads"
+
+: >"$eval_log"
+OMARCHY_TEST_RELOAD_CHANGE=rounding reload_position_flag
+grep -F 'position = "-1920x0"' "$eval_log" >/dev/null || fail "scale rounding does not invalidate the restored position"
+pass "scale rounding does not invalidate the restored position"
+
+for change in identity size scale rotation position panel panel-position removed; do
+  remember_position "-1920x0"
+  undock
+  : >"$eval_log"
+  OMARCHY_TEST_RELOAD_CHANGE="$change" reload_position_flag
+  [[ ! -s $eval_log && ! -f $position_flag ]] || fail "reload retires the position rule after a monitor change ($change)"
+done
+pass "reload drops the position rule when monitor identity or geometry changes"
+
+for flag in internal-monitor-disable internal-monitor-mirror internal-monitor-clamshell; do
+  remember_position "-1920x0"
+  undock
+  : >"$state_dir/$flag.lua"
+  : >"$eval_log"
+  reload_position_flag
+  [[ ! -s $eval_log && ! -f $position_flag ]] || fail "reload respects another monitor toggle ($flag)"
+  rm -f "$state_dir/$flag.lua"
+done
+pass "reload retires the position rule for manual disable, mirror or clamshell"
+
+remember_position "-1920x0"
+undock
+printf '\nhl.monitor({ output = "eDP-1", position = "200x0", mode = "1280x720", scale = 1 })\n' >>"$monitor_lua"
+: >"$eval_log"
+reload_position_flag
+[[ ! -s $eval_log && ! -f $position_flag ]] || fail "a changed monitor config retires the position rule"
+pass "monitor config edits take precedence over the restored position"
+write_default_auto_config
+
+# Hold the transaction lock before starting two callers. Neither may remove
+# the clamshell flag until the lock is released; only the first may reload.
+remember_position "-1920x0"
+printf 'hl.monitor({ output = "eDP-1", disabled = true })\n' >"$clamshell_flag"
+: >"$eval_log"
+exec 7>"$state_dir/internal-monitor-clamshell.lock"
+flock 7
+for caller in 1 2; do
+  HOME="$home_dir" PATH="$stub_bin:$PATH" OMARCHY_TEST_INTERNAL_X=1920 OMARCHY_TEST_EXTERNAL_X=0 \
+    OMARCHY_TEST_EXTERNAL_ACTIVE=true OMARCHY_TEST_RELOADED="$reloaded_marker" \
+    OMARCHY_TEST_HYPRCTL_EVAL_LOG="$eval_log" \
+    "$ROOT/bin/omarchy-hyprland-monitor-clamshell" 7>&- &
+  callers[$caller]=$!
+done
+sleep 0.1
+[[ -f $clamshell_flag && ! -s $eval_log ]] || fail "all clamshell callers wait for the shared transaction lock"
+flock -u 7
+exec 7>&-
+for caller in "${callers[@]}"; do wait "$caller"; done
+[[ $(grep -c '^reload$' "$eval_log") == "1" && -f $position_flag ]] || fail "concurrent undocks restore once without a second reload"
+pass "concurrent clamshell callers share one reload and restore transaction"
+
 # Same with a numeric scale that already matches: scale sync returns early too.
 write_catchall_scale_only_config
-remember_position "-1920x0"
+OMARCHY_TEST_INTERNAL_SCALE=1.5 remember_position "-1920x0"
 : >"$eval_log"
 OMARCHY_TEST_INTERNAL_SCALE=1.5 undock
 grep -F 'position = "-1920x0"' "$eval_log" >/dev/null || fail "undock restores the position when the scale already matches"
@@ -427,16 +532,22 @@ rm -f "$position_state"
 OMARCHY_TEST_EXTRA_EXTERNALS="$(twin HDMI-A-2 3840),$(unique 5760)" dock
 [[ $(sed -n 1p "$position_state") == "-5760x0" ]] || fail "clamshell disable anchors on the external that has no twin"
 : >"$eval_log"
-OMARCHY_TEST_EXTRA_EXTERNALS="$(twin HDMI-A-1 1920),$(unique 2500)" OMARCHY_TEST_EXTERNAL_NAME=HDMI-A-2 undock
-grep -F 'position = "-3260x0"' "$eval_log" >/dev/null || fail "undock follows the external with no twin even when the twins swap connectors"
+OMARCHY_TEST_EXTRA_EXTERNALS="$(twin HDMI-A-1 1920),$(unique 3840)" OMARCHY_TEST_EXTERNAL_NAME=HDMI-A-2 undock
+grep -F 'position = "-1920x0"' "$eval_log" >/dev/null || fail "undock follows the external with no twin even when the twins swap connectors"
 pass "undock anchors on the external that has no twin, whichever connectors the twins use"
 
-# A serial names the physical monitor, so a resolution change is still the same desk.
+# A serial still names the same screen, but its new size invalidates the offset.
 remember_position "-1920x0"
 : >"$eval_log"
 OMARCHY_TEST_EXTERNAL_WIDTH=3840 OMARCHY_TEST_EXTERNAL_HEIGHT=2160 undock
-grep -F 'position = "-1920x0"' "$eval_log" >/dev/null || fail "undock restores beside a monitor whose resolution changed"
-pass "undock restores beside a monitor whose resolution changed"
+! grep -F 'position = ' "$eval_log" >/dev/null || fail "undock drops an offset when the same monitor changes resolution"
+pass "undock drops an offset when the same monitor changes resolution"
+
+remember_position "-1920x0" "Samsung_Electric_Company_LF24T35_HX5X721467" "Samsung_Electric_Company_LF24T35_HX5X721467:1920:1080:1:0:0:0" "1280:720:2:0"
+: >"$eval_log"
+undock
+! grep -F 'position = ' "$eval_log" >/dev/null || fail "undock drops an offset when the panel geometry changed"
+pass "undock drops an offset when the panel geometry changed"
 
 # Two identical monitors are told apart by serial, wherever they are plugged in.
 remember_position "-1920x0"
@@ -484,7 +595,7 @@ remember_position "1100x0"
 : >"$eval_log"
 undock
 ! grep -F 'position = ' "$eval_log" >/dev/null || fail "undock sees an unrotated external in the way"
-remember_position "1100x0"
+remember_position "1100x0" "Samsung_Electric_Company_LF24T35_HX5X721467" "Samsung_Electric_Company_LF24T35_HX5X721467:1920:1080:1:1:0:0"
 : >"$eval_log"
 OMARCHY_TEST_EXTERNAL_TRANSFORM=1 undock
 grep -F 'position = "1100x0"' "$eval_log" >/dev/null || fail "undock restores beside a rotated external"
@@ -499,6 +610,12 @@ OMARCHY_TEST_INTERNAL_Y=-1080 dock
 OMARCHY_TEST_INTERNAL_Y=-1080 undock
 grep -F 'position = "-1920x-1080"' "$eval_log" >/dev/null || fail "undock restores a remembered negative offset"
 pass "clamshell disable/undock round-trips a negative offset"
+
+remember_position "-01920x-08"
+: >"$eval_log"
+undock
+grep -F 'position = "-1920x-8"' "$eval_log" >/dev/null || fail "remembered coordinates use decimal arithmetic"
+pass "remembered coordinates with leading zeros use decimal arithmetic"
 
 # A configured position for the internal output is applied by the reload itself,
 # so the restore leaves it alone -- even over a remembered one.
@@ -530,7 +647,7 @@ grep -F 'position = "auto"' "$eval_log" >/dev/null || fail "clamshell recovery f
 pass "clamshell recovery falls back to the default scale and position"
 
 # A corrupted or unsafe state file must not reach hyprctl verbatim.
-for bad in 'not-a-position' '0x0", disabled = false }) -- '; do
+for bad in 'not-a-position' '0x0", disabled = false }) -- ' '999999999999999999999999999999999999999x0'; do
   write_default_auto_config
   remember_position "$bad"
   : >"$eval_log"
@@ -606,6 +723,23 @@ OMARCHY_TEST_INTERNAL_SCALE=3 OMARCHY_TEST_INTERNAL_X=0 run_clamshell
 grep -F 'scale = 1.5' "$eval_log" >/dev/null || fail "a live scale correction applies the configured scale"
 grep -F 'position = "0x0"' "$eval_log" >/dev/null || fail "a live scale correction keeps the panel's live position"
 pass "a live scale correction keeps the panel where it is"
+
+printf '%s\n' 'hl.monitor({ output = "eDP-1", mode = "1280x720", position = "auto", scale = 1.5 })' >"$monitor_lua"
+: >"$eval_log"
+OMARCHY_TEST_INTERNAL_SCALE=3 run_clamshell
+! grep -F 'mode = "preferred"' "$eval_log" >/dev/null || fail "scale correction preserves the configured mode"
+HOME="$home_dir" lua - "$eval_log" <<'LUA'
+hl = {
+  get_monitor = function() return { width = 1280, height = 720, refresh_rate = 60, transform = 1 } end,
+  monitor = function(rule)
+    assert(rule.mode == "1280x720@60.00000", "scale correction preserves the active mode")
+    assert(rule.transform == 1, "scale correction preserves the active rotation")
+  end,
+}
+dofile(arg[1])
+LUA
+pass "moving or scaling a panel preserves its configured mode and rotation"
+write_catchall_scale_only_config
 
 # ...unless the new scale widens it into a neighbor: a 1920px panel at scale 3
 # is 640 wide, and at scale 1.5 it is 1280, past an external at 700.
