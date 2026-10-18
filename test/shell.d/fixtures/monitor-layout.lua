@@ -8,6 +8,7 @@ local monitors = { external, panel }
 
 for reload = 1, 3 do
   local rules = {}
+  local calls = 0
   hl = {
     get_monitors = function() return monitors end,
     get_monitor = function(name)
@@ -15,13 +16,16 @@ for reload = 1, 3 do
         if monitor.name == name then return monitor end
       end
     end,
-    monitor = function(rule) rules[rule.output] = rule end,
+    monitor = function(rule)
+      assert(not rules[rule.output], "reload emitted a duplicate output rule")
+      rules[rule.output] = rule
+      calls = calls + 1
+    end,
   }
-  local file = io.open(arg[1])
-  if file then
-    file:close()
-    dofile(arg[1])
-  end
+  local file = assert(io.open(arg[1]), "the saved arrangement toggle must exist")
+  file:close()
+  dofile(arg[1])
+  assert(calls == #monitors, "reload must explicitly position every output")
   local right = 0
   for _, monitor in ipairs(monitors) do
     local rule = rules[monitor.name]

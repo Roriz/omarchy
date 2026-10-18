@@ -748,14 +748,17 @@ printf '%s\n' 'hl.monitor({ output = "eDP-1", mode = "1280x720", position = "aut
 OMARCHY_TEST_INTERNAL_SCALE=3 run_clamshell
 ! grep -F 'mode = "preferred"' "$eval_log" >/dev/null || fail "scale correction preserves the configured mode"
 HOME="$home_dir" lua - "$eval_log" <<'LUA'
+local calls = 0
 hl = {
   get_monitor = function() return { width = 1280, height = 720, refresh_rate = 60, transform = 1 } end,
   monitor = function(rule)
+    calls = calls + 1
     assert(rule.mode == "1280x720@60.00000", "scale correction preserves the active mode")
     assert(rule.transform == 1, "scale correction preserves the active rotation")
   end,
 }
 dofile(arg[1])
+assert(calls == 1, "scale correction must emit one panel rule")
 LUA
 pass "moving or scaling a panel preserves its configured mode and rotation"
 write_catchall_scale_only_config
@@ -899,6 +902,14 @@ done
 
 # A per-panel position rule also affects automatic externals. Replay placement,
 # including the external, rather than only logging the panel rule on reload.
+: >"$test_tmp/empty-toggle.lua"
+for toggle in "$test_tmp/missing-toggle.lua" "$test_tmp/empty-toggle.lua"; do
+  if HOME="$home_dir" lua "$SHELL_TEST_DIR/fixtures/monitor-layout.lua" "$toggle" 1920 0 >"$test_tmp/invalid-toggle.log" 2>&1; then
+    fail "the placement fixture rejects a missing or empty toggle"
+  fi
+done
+pass "the placement fixture rejects missing and empty arrangement toggles"
+
 layout_regressions=0
 for offset in 1920x0 0x1080; do
   write_default_auto_config
