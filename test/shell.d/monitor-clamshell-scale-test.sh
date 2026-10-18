@@ -30,7 +30,7 @@ if [[ $1 == "monitors" && $2 == "all" && $3 == "-j" ]]; then
   # A real `hyprctl monitors all -j` lists every output, not just the
   # internal one -- keep an external entry in the array so selection-by-name
   # is exercised the same way it is in production, for every case below.
-  external=$(printf '{"name":"%s","make":"%s","model":"%s","serial":"%s","disabled":false,"scale":1,"transform":%s,"x":%s,"y":0,"width":%s,"height":%s}' \
+  external=$(printf '{"name":"%s","make":"%s","model":"%s","serial":"%s","disabled":false,"scale":1,"refreshRate":60,"transform":%s,"x":%s,"y":0,"width":%s,"height":%s}' \
     "${OMARCHY_TEST_EXTERNAL_NAME:-HDMI-A-1}" "${OMARCHY_TEST_EXTERNAL_MAKE-Samsung Electric Company}" \
     "${OMARCHY_TEST_EXTERNAL_MODEL-LF24T35}" "${OMARCHY_TEST_EXTERNAL_SERIAL-HX5X721467}" \
     "${OMARCHY_TEST_EXTERNAL_TRANSFORM:-0}" "${OMARCHY_TEST_EXTERNAL_X:-1920}" \
@@ -42,7 +42,7 @@ if [[ $1 == "monitors" && $2 == "all" && $3 == "-j" ]]; then
   if [[ ${OMARCHY_TEST_INTERNAL_DISABLED:-false} == "true" && ! -f $OMARCHY_TEST_RELOADED ]]; then
     printf '[%s,{"name":"eDP-1","disabled":true,"scale":null,"x":null,"y":null}]' "$external"
   else
-    printf '[%s,{"name":"eDP-1","disabled":false,"scale":%s,"transform":0,"width":1920,"height":1080,"x":%s,"y":%s}]' \
+    printf '[%s,{"name":"eDP-1","disabled":false,"scale":%s,"refreshRate":60,"transform":0,"width":1920,"height":1080,"x":%s,"y":%s}]' \
       "$external" "${OMARCHY_TEST_INTERNAL_SCALE:-2}" "${OMARCHY_TEST_INTERNAL_X:-0}" "${OMARCHY_TEST_INTERNAL_Y:-0}"
   fi
 elif [[ $1 == "eval" ]]; then
@@ -83,6 +83,8 @@ cat >"$stub_bin/omarchy-hw-clamshell" <<'SH'
 SH
 
 chmod +x "$stub_bin"/*
+
+export OMARCHY_PATH="$ROOT"
 
 write_auto_monitor_config() {
   cat >"$monitor_lua" <<'LUA'
@@ -256,7 +258,10 @@ remember_position() {
   mkdir -p "$state_dir"
   local layout="${2:-Samsung_Electric_Company_LF24T35_HX5X721467}"
   local geometry="${3:-$layout:1920:1080:1:0:0:0}"
-  printf '%s\n%s\n%s\n%s\n' "$1" "$layout" "$geometry" "${4:-1920:1080:${OMARCHY_TEST_INTERNAL_SCALE:-2}:0}" >"$position_state"
+  {
+    printf '%s\n%s\n%s\n%s\n' "$1" "$layout" "$geometry" "${4:-1920:1080:${OMARCHY_TEST_INTERNAL_SCALE:-2}:0}"
+    cat "$monitor_lua"
+  } >"$position_state"
 }
 
 # OMARCHY_TEST_UNDOCK=true starts from a docked state: the clamshell flag is set
@@ -379,11 +384,12 @@ pass "undock persists the restored position for future reloads"
 reload_position_flag() {
   HOME="$home_dir" lua - "$position_flag" >>"$eval_log" <<'LUA'
 local panel = { name = "eDP-1", serial = "", width = 1920, height = 1080, scale = 2, refresh_rate = 60, transform = 0, x = -1920, y = 0 }
-local external = { name = "HDMI-A-1", serial = "HX5X721467", width = 1920, height = 1080, scale = 1, transform = 0, x = 0, y = 0 }
+local external = { name = "HDMI-A-1", serial = "HX5X721467", width = 1920, height = 1080, scale = 1, refresh_rate = 60, transform = 0, x = 0, y = 0 }
 local change = os.getenv("OMARCHY_TEST_RELOAD_CHANGE")
 if change == "identity" then external.serial = "OTHER" end
 if change == "size" then external.width = 3840 end
 if change == "scale" then external.scale = 2 end
+if change == "refresh" then external.refresh_rate = 120 end
 if change == "rotation" then external.transform = 1 end
 if change == "position" then external.x = 500 end
 if change == "panel" then panel.width = 2560 end
@@ -418,7 +424,7 @@ OMARCHY_TEST_RELOAD_CHANGE=rounding reload_position_flag
 grep -F 'position = "-1920x0"' "$eval_log" >/dev/null || fail "scale rounding does not invalidate the restored position"
 pass "scale rounding does not invalidate the restored position"
 
-for change in identity size scale rotation position panel panel-position removed; do
+for change in identity size scale refresh rotation position panel panel-position removed; do
   remember_position "-1920x0"
   undock
   : >"$eval_log"
@@ -477,14 +483,15 @@ OMARCHY_TEST_INTERNAL_SCALE=1.5 undock
 grep -F 'position = "-1920x0"' "$eval_log" >/dev/null || fail "undock restores the position when the scale already matches"
 pass "undock restores the position when the scale already matches"
 
-# A panel the reload already put in the right place needs no second apply.
+# Persist the complete arrangement even when auto already placed the panel:
+# an external left on auto could otherwise move on the following reload.
 write_default_auto_config
 remember_position "-1920x0"
 : >"$eval_log"
 OMARCHY_TEST_INTERNAL_X=-1920 undock
-! grep -F 'position = ' "$eval_log" >/dev/null || fail "undock does not reapply a position the panel already holds"
+[[ -f $position_flag ]] || fail "undock retains an arrangement the panel already holds"
 [[ ! -f $position_state ]] || fail "undock spends the offset even when nothing needed moving"
-pass "undock skips a restore that has nothing to move"
+pass "undock retains a correct arrangement across future reloads"
 
 # An offset captured at another desk must not be applied: the externals now
 # present differ from those it was captured beside. It is dropped, not kept.
@@ -510,10 +517,10 @@ pass "undock applies the remembered offset relative to the external's new positi
 # is saved; with a monitor of its own among them, that one is the anchor and the
 # twins swapping places changes nothing.
 twin() {
-  printf '{"name":"%s","make":"Samsung Electric Company","model":"LF24T35","serial":"HX5X721467","disabled":false,"scale":1,"transform":0,"x":%s,"y":0,"width":1920,"height":1080}' "$1" "$2"
+  printf '{"name":"%s","make":"Samsung Electric Company","model":"LF24T35","serial":"HX5X721467","disabled":false,"scale":1,"refreshRate":60,"transform":0,"x":%s,"y":0,"width":1920,"height":1080}' "$1" "$2"
 }
 unique() {
-  printf '{"name":"DP-1","make":"Dell","model":"U2723QE","serial":"UNIQ1","disabled":false,"scale":1,"transform":0,"x":%s,"y":0,"width":1920,"height":1080}' "$1"
+  printf '{"name":"DP-1","make":"Dell","model":"U2723QE","serial":"UNIQ1","disabled":false,"scale":1,"refreshRate":60,"transform":0,"x":%s,"y":0,"width":1920,"height":1080}' "$1"
 }
 
 write_default_auto_config
@@ -877,3 +884,74 @@ for config in nested_table semicolon block_comment; do
   grep -F 'scale = 1.25' "$eval_log" >/dev/null || fail "clamshell recovery reads the scale out of a ${config//_/ } rule"
   pass "clamshell recovery reads a ${config//_/ } rule"
 done
+
+# A per-panel position rule also affects automatic externals. Replay placement,
+# including the external, rather than only logging the panel rule on reload.
+layout_regressions=0
+for offset in 1920x0 0x1080; do
+  write_default_auto_config
+  remember_position "$offset"
+  OMARCHY_TEST_INTERNAL_X=1920 OMARCHY_TEST_EXTERNAL_X=0 undock
+  if HOME="$home_dir" lua "$SHELL_TEST_DIR/fixtures/monitor-layout.lua" "$position_flag" "${offset%x*}" "${offset#*x}"; then
+    pass "clamshell layout $offset survives repeated reloads without moving the external"
+  else
+    ((layout_regressions += 1))
+  fi
+done
+
+# The Display panel edits the generic scale local. A watcher correcting the
+# scale before the reload must not adopt the edited config as a fresh snapshot.
+write_default_auto_config
+remember_position "-1920x0"
+undock
+sed -i 's/local omarchy_monitor_scale = "auto"/local omarchy_monitor_scale = 1.5/' "$monitor_lua"
+OMARCHY_TEST_INTERNAL_X=-1920 OMARCHY_TEST_EXTERNAL_X=0 run_clamshell
+if [[ -f $position_flag ]]; then
+  printf 'scale correction retained a position rule after the config changed\n' >&2
+  ((layout_regressions += 1))
+else
+  pass "scale correction retires a position rule after a Display panel config edit"
+fi
+(( layout_regressions == 0 )) || fail "clamshell restore preserves the arrangement and respects config edits" "$layout_regressions regressions"
+
+# A correction back to the same configured scale preserves the original record,
+# while a config edit during docking spends the pending offset without using it.
+write_default_auto_config
+sed -i 's/local omarchy_monitor_scale = "auto"/local omarchy_monitor_scale = 2/' "$monitor_lua"
+remember_position "-1920x0"
+undock
+layout_record="$state_dir/internal-monitor-layout"
+cp "$layout_record" "$test_tmp/layout-before-scale"
+OMARCHY_TEST_INTERNAL_SCALE=3 OMARCHY_TEST_INTERNAL_X=-1920 OMARCHY_TEST_EXTERNAL_X=0 run_clamshell
+[[ -f $position_flag ]] && cmp -s "$layout_record" "$test_tmp/layout-before-scale" || fail "scale correction retains the original unedited layout record"
+reload_position_flag
+pass "scale correction preserves the original layout record when config is unchanged"
+
+write_default_auto_config
+remember_position "-1920x0"
+printf '\n-- changed while docked\n' >>"$monitor_lua"
+: >"$eval_log"
+undock
+[[ ! -f $position_flag ]] && ! grep -F 'position = "-1920x0"' "$eval_log" >/dev/null || fail "config edits while docked discard the pending offset"
+pass "config edits while docked discard the pending offset"
+
+# A record is parsed as data and must be complete, finite and versioned.
+for corruption in version count columns coordinate width scale config missing; do
+  write_default_auto_config
+  remember_position "-1920x0"
+  undock
+  case "$corruption" in
+    version) sed -i '1s/.*/99/' "$layout_record" ;;
+    count) sed -i '3s/.*/99999999999999999999/' "$layout_record" ;;
+    columns) sed -i '4s/.*/unsafe code();/' "$layout_record" ;;
+    coordinate) sed -i '4s/\t0\t0\t60$/\t1e99\t0\t60/' "$layout_record" ;;
+    width) sed -i '4s/\t1920\t/\t1e99\t/' "$layout_record" ;;
+    scale) sed -i '4s/\t1\t0\t/\t0\t0\t/' "$layout_record" ;;
+    config) printf '\nchanged\n' >>"$layout_record" ;;
+    missing) rm "$layout_record" ;;
+  esac
+  : >"$eval_log"
+  reload_position_flag
+  [[ ! -s $eval_log && ! -f $position_flag ]] || fail "reload refuses an unsafe or incomplete layout record ($corruption)"
+done
+pass "reload refuses unsafe, incomplete and unsupported layout records"
