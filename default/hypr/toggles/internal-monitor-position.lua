@@ -17,6 +17,8 @@ for _, flag in ipairs({ "internal-monitor-clamshell", "internal-monitor-disable"
   end
 end
 
+-- Bash arms this record only after the clamshell reload and scale sync.
+-- A pending capture uses a different path, invisible to an earlier toggle.
 local file = io.open(dir .. "internal-monitor-position", "rb")
 local restoring = file ~= nil
 if not file then file = io.open(dir .. "internal-monitor-layout", "rb") end

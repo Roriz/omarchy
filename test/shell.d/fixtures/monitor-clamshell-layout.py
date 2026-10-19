@@ -108,6 +108,15 @@ def tests(root):
     stub = temporary / "bin"
     stub.mkdir()
     commands = {"hyprctl": f'exec python3 "{Path(__file__).resolve()}" hyprctl "$@"',
+          "mv": r'''/usr/bin/mv "$@" || exit
+case ${*: -1} in
+  */internal-monitor-position|*/internal-monitor-position-pending)
+    if [[ ${OMARCHY_TEST_CAPTURE_RELOAD:-0} == "1" && -f $HOME/.local/state/omarchy/toggles/hypr/internal-monitor-position.lua ]]; then
+      printf 'capture-reload\n' >>"$OMARCHY_TEST_LOG"
+      hyprctl reload
+    fi
+    ;;
+esac''',
           "omarchy-hyprland-monitor-laptop": "echo eDP-1",
           "omarchy-hyprland-monitor-external-active": "exit 0",
           "omarchy-hw-clamshell": '[[ ${OMARCHY_TEST_CLOSED:-0} == "1" ]]',
@@ -133,8 +142,9 @@ def tests(root):
       data.write_text(json.dumps(monitors or [external, panel]))
       log.write_text("")
 
-    def run(closed=False):
-      subprocess.run([str(script)], env=dict(env, OMARCHY_TEST_CLOSED="1" if closed else "0"), check=True)
+    def run(closed=False, capture_reload=False):
+      subprocess.run([str(script)], env=dict(env, OMARCHY_TEST_CLOSED="1" if closed else "0",
+        OMARCHY_TEST_CAPTURE_RELOAD="1" if capture_reload else "0"), check=True)
 
     def reload():
       subprocess.run([str(stub / "hyprctl"), "reload"], env=env, check=True)
@@ -150,12 +160,29 @@ def tests(root):
     def passed(label):
       print("ok - " + label, flush=True)
 
+    # Reload exactly after publishing the second dock's snapshot, while the
+    # previous cycle's toggle still exists. It must not consume the new record.
+    for x, y, ex in [(0, 0, 960), (1280, 0, 0), (0, 800, 0)]:
+      reset([dict(external, x=ex), dict(panel, x=x, y=y)])
+      expected = current()
+      run(True)
+      run()
+      same(expected)
+      log.write_text("")
+      run(True, capture_reload=True)
+      assert "capture-reload" in log.read_text(), "reload must land during snapshot publication"
+      run()
+      same(expected)
+      reload()
+      same(expected)
+      passed(f"external reload during dock preserves the next restore at {x}x{y}")
+
     # Identical outputs must work even when no external can anchor an offset.
     twin = dict(external, name="DP-1", serial="", x=2240)
     reset([dict(external, serial=""), twin, panel])
     expected = current()
     run(True)
-    assert (state / "internal-monitor-position").exists(), "identical outputs need a snapshot"
+    assert (state / "internal-monitor-position-pending").exists(), "identical outputs need a snapshot"
     run()
     same(expected)
     passed("exact snapshots restore identical external monitors without serials")
@@ -193,14 +220,16 @@ def tests(root):
 
     reset()
     run(True)
-    pending = state / "internal-monitor-position"
+    pending = state / "internal-monitor-position-pending"
     captured = pending.read_bytes()
     assert pending.stat().st_mode & 0o777 == 0o600
+    assert not (state / "internal-monitor-position").exists(), "docked snapshots must remain unarmed"
     run(True)
     assert pending.read_bytes() == captured, "disabled polls must retain the snapshot"
     run()
     persisted = state / "internal-monitor-layout"
     assert not pending.exists() and persisted.read_bytes() == captured
+    assert not (state / "internal-monitor-position").exists(), "restoration must consume the armed record"
     assert persisted.stat().st_mode & 0o777 == 0o600
     passed("private atomic snapshot survives docked polls and is consumed unchanged")
 
@@ -235,13 +264,13 @@ def tests(root):
     state.mkdir(parents=True)
     (state / "internal-monitor-disable.lua").touch()
     run(True)
-    assert not (state / "internal-monitor-position").exists()
+    assert not (state / "internal-monitor-position-pending").exists()
     assert not (state / "internal-monitor-scale").exists()
     passed("manual disable prevents clamshell capture")
 
     reset([external, dict(panel, x=0.5)])
     run(True)
-    assert not (state / "internal-monitor-position").exists()
+    assert not (state / "internal-monitor-position-pending").exists()
     passed("non-integer compositor coordinates are never captured")
 
     reset()
@@ -249,7 +278,7 @@ def tests(root):
     run(True)
     run()
     assert not (state / "internal-monitor-position.lua").exists()
-    assert not (state / "internal-monitor-position").exists()
+    assert not (state / "internal-monitor-position-pending").exists()
     passed("explicit panel positions take precedence over saved layouts")
 
     for scale, width in [(1.3333334, 1440), (1.6666666, 1152)]:
@@ -286,7 +315,7 @@ def tests(root):
       data.write_text(json.dumps(monitors))
       run()
       assert not any((state / name).exists() for name in
-             ["internal-monitor-position", "internal-monitor-layout", "internal-monitor-position.lua"]), key
+             ["internal-monitor-position-pending", "internal-monitor-position", "internal-monitor-layout", "internal-monitor-position.lua"]), key
     passed("changed connectors, identities, geometry and output sets discard pending snapshots")
 
     for key, value in [("x", 200), ("y", 200), ("scale", 2), ("width", 3840), ("serial", "different")]:
@@ -317,7 +346,7 @@ def tests(root):
       config.write_text(config.read_text().replace('"auto"', '3'))
       run()
       assert not (state / "internal-monitor-position.lua").exists()
-      assert not (state / "internal-monitor-position").exists()
+      assert not (state / "internal-monitor-position-pending").exists()
       assert not (state / "internal-monitor-layout").exists()
     passed("config edits during docking or before scale correction discard the original snapshot")
 
@@ -341,7 +370,10 @@ def tests(root):
       pending.write_text("".join(lines))
       if corruption == "missing":
         pending.unlink()
+      before = len(log.read_text())
       run()
+      counts = re.findall(r"^rules (\d+)$", log.read_text()[before:], re.MULTILINE)
+      assert counts and all(int(count) == 0 for count in counts), f"{corruption} emitted rules: {counts}"
       assert not (state / "internal-monitor-position.lua").exists(), corruption
     passed("unsafe, incomplete, overlapping and unsupported records never apply")
 

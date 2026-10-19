@@ -7,6 +7,7 @@ TOGGLES_DIR="$HOME/.local/state/omarchy/toggles/hypr"
 CLAMSHELL_FLAG="$TOGGLES_DIR/internal-monitor-clamshell.lua"
 MANUAL_DISABLE_FLAG="$TOGGLES_DIR/internal-monitor-disable.lua"
 SCALE_STATE="$TOGGLES_DIR/internal-monitor-scale"
+POSITION_PENDING="$TOGGLES_DIR/internal-monitor-position-pending"
 POSITION_STATE="$TOGGLES_DIR/internal-monitor-position"
 POSITION_FLAG="$TOGGLES_DIR/internal-monitor-position.lua"
 POSITION_LAYOUT="$TOGGLES_DIR/internal-monitor-layout"
@@ -182,7 +183,7 @@ remember_internal_position() {
       ((.description // "") | gsub("[^A-Za-z0-9._:-]"; "_")),
       .width, .height, .scale, (.transform // 0), .x, .y, .refreshRate] | map(tostring) | join("\t")' <<<"$monitors"
     cat "$MONITOR_LUA"
-  } >"$temporary" || ! mv "$temporary" "$POSITION_STATE"; then
+  } >"$temporary" || ! mv "$temporary" "$POSITION_PENDING"; then
     rm -f "$temporary"
   fi
 }
@@ -298,15 +299,18 @@ sync_internal_scale() {
 # The fixed toggle validates the captured config and outputs before its first
 # application, then requires their positions to match on subsequent reloads.
 restore_internal_position() {
-  [[ -n $INTERNAL && -f $POSITION_STATE ]] || return 0
+  [[ -n $INTERNAL && -f $POSITION_PENDING ]] || return 0
   if [[ $(read_monitor_position) != "auto" ]]; then
-    rm -f "$POSITION_STATE"
+    rm -f "$POSITION_PENDING"
     return 0
   fi
 
   local temporary
   temporary=$(mktemp "$TOGGLES_DIR/.internal-monitor-position.XXXXXX") || return 0
-  if cp "$OMARCHY_PATH/default/hypr/toggles/internal-monitor-position.lua" "$temporary" && mv "$temporary" "$POSITION_FLAG"; then
+  # An old toggle can run during capture. Only arm the snapshot after the
+  # clamshell reload and scale sync, when it is ready to be restored.
+  if cp "$OMARCHY_PATH/default/hypr/toggles/internal-monitor-position.lua" "$temporary" &&
+    mv "$POSITION_PENDING" "$POSITION_STATE" && mv "$temporary" "$POSITION_FLAG"; then
     hyprctl eval 'dofile(os.getenv("HOME") .. "/.local/state/omarchy/toggles/hypr/internal-monitor-position.lua")' >/dev/null 2>&1 || true
   else
     rm -f "$temporary"
@@ -329,7 +333,7 @@ enable_internal() {
   fi
 
   if [[ -f $CLAMSHELL_FLAG ]]; then
-    rm -f "$CLAMSHELL_FLAG" "$POSITION_FLAG" "$POSITION_LAYOUT"
+    rm -f "$CLAMSHELL_FLAG" "$POSITION_FLAG" "$POSITION_LAYOUT" "$POSITION_STATE"
     changed=1
     reload=1
   fi
@@ -357,7 +361,7 @@ disable_internal() {
   if [[ ! -f $CLAMSHELL_FLAG ]] || [[ $(< "$CLAMSHELL_FLAG") != $config ]]; then
     remember_internal_scale
     remember_internal_position
-    rm -f "$POSITION_FLAG" "$POSITION_LAYOUT"
+    rm -f "$POSITION_FLAG" "$POSITION_LAYOUT" "$POSITION_STATE"
     printf '%s\n' "$config" >"$CLAMSHELL_FLAG"
     hyprctl reload >/dev/null 2>&1 || true
   fi

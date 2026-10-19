@@ -17,7 +17,7 @@ reloaded_marker="$test_tmp/reloaded"
 clamshell_flag="$home_dir/.local/state/omarchy/toggles/hypr/internal-monitor-clamshell.lua"
 state_dir="$home_dir/.local/state/omarchy/toggles/hypr"
 scale_state="$state_dir/internal-monitor-scale"
-position_state="$state_dir/internal-monitor-position"
+position_state="$state_dir/internal-monitor-position-pending"
 position_flag="$state_dir/internal-monitor-position.lua"
 manual_disable_flag="$state_dir/internal-monitor-disable.lua"
 
