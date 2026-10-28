@@ -122,6 +122,12 @@ current_internal_scale() {
   hyprctl monitors all -j | jq -r --arg internal "$INTERNAL" '.[] | select(.name == $internal and .disabled != true) | .scale' | head -1
 }
 
+# Hyprland's FALLBACK stands in once nothing is left, so it is not somewhere to
+# run; a headless output is, and is invisible to the DRM check.
+other_output_enabled() {
+  hyprctl monitors all -j | jq -e --arg internal "$INTERNAL" 'any(.[]; .name != $internal and .name != "FALLBACK" and .disabled == false)' >/dev/null 2>&1
+}
+
 store_internal_scale() {
   local scale="$1"
   valid_scale "$scale" || return 0
@@ -235,11 +241,15 @@ read_monitor_position() {
 }
 
 apply_internal_output() {
+  local enable=""
+  # Preserve the Display panel's runtime disable while another output is
+  # available, but recover the panel after the last external is unplugged.
+  omarchy-hw-external-monitors || other_output_enabled || enable="disabled = false, "
   # A new per-output rule does not inherit the catch-all's mode or transform.
   # Carry the enabled panel's values so the fit check measures what we apply.
   hyprctl eval "local panel = hl.get_monitor(\"$INTERNAL\")
-    hl.monitor({ output = \"$INTERNAL\", position = \"$1\", scale = $2,
-      mode = panel and string.format(\"%dx%d@%.5f\", panel.width, panel.height, panel.refresh_rate),
+    hl.monitor({ output = \"$INTERNAL\", ${enable}position = \"$1\", scale = $2,
+      mode = panel and string.format(\"%dx%d@%.5f\", panel.width, panel.height, panel.refresh_rate) or \"preferred\",
       transform = panel and panel.transform })" >/dev/null 2>&1 || true
 }
 

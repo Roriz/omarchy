@@ -4,6 +4,7 @@ set -euo pipefail
 
 source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/base-test.sh"
 
+require_command jq
 require_command lua
 
 test_tmp=$(mktemp -d)
@@ -13,13 +14,8 @@ stub_bin="$test_tmp/bin"
 home_dir="$test_tmp/home"
 monitor_lua="$home_dir/.config/hypr/monitors.lua"
 eval_log="$test_tmp/hyprctl-eval.log"
-reloaded_marker="$test_tmp/reloaded"
-clamshell_flag="$home_dir/.local/state/omarchy/toggles/hypr/internal-monitor-clamshell.lua"
 state_dir="$home_dir/.local/state/omarchy/toggles/hypr"
 scale_state="$state_dir/internal-monitor-scale"
-position_state="$state_dir/internal-monitor-position-pending"
-position_flag="$state_dir/internal-monitor-position.lua"
-manual_disable_flag="$state_dir/internal-monitor-disable.lua"
 
 mkdir -p "$stub_bin" "$home_dir/.config/hypr"
 
@@ -35,6 +31,9 @@ if [[ $1 == "monitors" && $2 == "all" && $3 == "-j" ]]; then
     "${OMARCHY_TEST_EXTERNAL_MODEL-LF24T35}" "${OMARCHY_TEST_EXTERNAL_SERIAL-HX5X721467}" \
     "${OMARCHY_TEST_EXTERNAL_TRANSFORM:-0}" "${OMARCHY_TEST_EXTERNAL_X:-1920}" \
     "${OMARCHY_TEST_EXTERNAL_WIDTH:-1920}" "${OMARCHY_TEST_EXTERNAL_HEIGHT:-1080}")
+  if [[ -n ${OMARCHY_TEST_OTHER_OUTPUT:-} ]]; then
+    external=$(printf '{"name":"%s","disabled":false,"scale":1}' "$OMARCHY_TEST_OTHER_OUTPUT")
+  fi
   # More outputs, as ready-made JSON objects joined by commas.
   [[ -z ${OMARCHY_TEST_EXTRA_EXTERNALS:-} ]] || external="$external,$OMARCHY_TEST_EXTRA_EXTERNALS"
   # A real reload re-enables the panel once the clamshell flag is gone, at
@@ -51,10 +50,10 @@ if [[ $1 == "monitors" && $2 == "all" && $3 == "-j" ]]; then
   fi
 elif [[ $1 == "eval" ]]; then
   printf '%s\n' "$2" >>"$OMARCHY_TEST_HYPRCTL_EVAL_LOG"
-  [[ -z ${OMARCHY_TEST_APPLIED_SCALE:-} ]] || touch "$OMARCHY_TEST_APPLIED_MARKER"
+  touch "$OMARCHY_TEST_APPLIED_MARKER"
 elif [[ $1 == "reload" ]]; then
   printf 'reload\n' >>"$OMARCHY_TEST_HYPRCTL_EVAL_LOG"
-  [[ -f $HOME/.local/state/omarchy/toggles/hypr/internal-monitor-clamshell.lua ]] || touch "$OMARCHY_TEST_RELOADED"
+  touch "$OMARCHY_TEST_RELOADED"
 elif [[ $1 == "dispatch" ]]; then
   printf 'dispatch %s\n' "$2" >>"$OMARCHY_TEST_HYPRCTL_EVAL_LOG"
 else
@@ -87,245 +86,109 @@ cat >"$stub_bin/omarchy-hw-clamshell" <<'SH'
 [[ ${OMARCHY_TEST_CLAMSHELL:-false} == "true" ]]
 SH
 
+cat >"$stub_bin/omarchy-hw-external-monitors" <<'SH'
+#!/bin/bash
+[[ ${OMARCHY_TEST_EXTERNAL_CONNECTED:-false} == "true" ]]
+SH
+
 chmod +x "$stub_bin"/*
-
-export OMARCHY_PATH="$ROOT"
-
-write_auto_monitor_config() {
-  cat >"$monitor_lua" <<'LUA'
-local omarchy_gdk_scale = 2
-local omarchy_monitor_scale = "auto"
-LUA
-}
-
-# The shipped default's own shape: the catch-all rule hands the panel a
-# bare-word reference to the "auto" local.
-write_default_auto_config() {
-  cat >"$monitor_lua" <<'LUA'
-local omarchy_gdk_scale = 2
-local omarchy_monitor_scale = "auto"
-
-hl.env("GDK_SCALE", tostring(omarchy_gdk_scale))
-hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale })
-LUA
-}
-
-write_internal_monitor_config() {
-  cat >"$monitor_lua" <<'LUA'
-hl.monitor({ output = "eDP-1", mode = "preferred", position = "0x0", scale = 1.25 })
-hl.monitor({ output = "", mode = "preferred", position = "auto-right", scale = 1 })
-LUA
-}
-
-# A specific-output rule that references the omarchy_monitor_scale variable
-# (the default template's pattern) instead of a literal value. The variable
-# must be resolved, not captured as the literal string "omarchy_monitor_scale".
-write_internal_monitor_var_config() {
-  cat >"$monitor_lua" <<'LUA'
-local omarchy_gdk_scale = 1.5
-local omarchy_monitor_scale = 1.5
-hl.env("GDK_SCALE", tostring(omarchy_gdk_scale))
-hl.monitor({ output = "eDP-1", mode = "preferred", position = "auto", scale = omarchy_monitor_scale })
-LUA
-}
-
-# An explicit non-numeric scale on the internal rule, alongside an unrelated
-# omarchy_monitor_scale local that must not be substituted for it.
-write_internal_monitor_auto_config() {
-  cat >"$monitor_lua" <<'LUA'
-local omarchy_monitor_scale = 2
-hl.monitor({ output = "eDP-1", mode = "preferred", position = "auto", scale = "auto" })
-LUA
-}
-
-# The internal rule names a local that does not exist. The catch-all rule below
-# it never applies to an output that has its own rule, so it must not be read.
-write_internal_monitor_unresolvable_config() {
-  cat >"$monitor_lua" <<'LUA'
-hl.monitor({ output = "eDP-1", mode = "preferred", position = "auto", scale = my_scale })
-hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1 })
-LUA
-}
-
-# The shipped default: no rule for the internal panel, and the catch-all rule
-# references the omarchy_monitor_scale local. Quoted here, and commented below.
-write_catch_all_var_config() {
-  cat >"$monitor_lua" <<'LUA'
-local omarchy_monitor_scale = "1.5"
-hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale })
-LUA
-}
-
-write_commented_catch_all_var_config() {
-  cat >"$monitor_lua" <<'LUA'
-local omarchy_monitor_scale = 1.25 -- HiDPI panel
-hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale })
-LUA
-}
-
-# A position that references a local, the same pattern the scale key allows.
-write_internal_monitor_position_var_config() {
-  cat >"$monitor_lua" <<'LUA'
-local omarchy_monitor_position = "0x0"
-hl.monitor({ output = "eDP-1", mode = "preferred", position = omarchy_monitor_position, scale = 1.25 })
-LUA
-}
-
-# An internal rule that names no scale at all, so the catch-all supplies one.
-write_internal_monitor_scaleless_config() {
-  cat >"$monitor_lua" <<'LUA'
-hl.monitor({ output = "eDP-1", mode = "preferred", position = "auto", transform = 1 })
-hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1 })
-LUA
-}
-
-# A local holding an expression rather than a scalar. Half of it is not a scale.
-write_expression_scale_config() {
-  cat >"$monitor_lua" <<'LUA'
-local omarchy_monitor_scale = 3 / 2
-hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale })
-LUA
-}
-
-# A local that happens to be named after a quoted scale value. The quotes make
-# the rule's "auto" a string, so the local must not be substituted for it.
-write_shadowed_auto_config() {
-  cat >"$monitor_lua" <<'LUA'
-local auto = 1.5
-hl.monitor({ output = "eDP-1", mode = "preferred", position = "auto", scale = "auto" })
-LUA
-}
-
-# An expression written straight into the rule rather than into a local.
-write_expression_rule_config() {
-  cat >"$monitor_lua" <<'LUA'
-hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 3 / 2 })
-LUA
-}
-
-# Commented-out text after a rule is not a rule, and not one of its keys either.
-write_commented_rule_config() {
-  cat >"$monitor_lua" <<'LUA'
-hl.monitor({ output = "DP-1", mode = "preferred", position = "auto", scale = 1 }) -- output = "eDP-1"
-hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1.5 })
-LUA
-}
-
-write_commented_internal_rule_config() {
-  cat >"$monitor_lua" <<'LUA'
-hl.monitor({ output = "eDP-1", mode = "preferred", position = "auto", scale = 1.25 }) -- scale = 3
-LUA
-}
-
-# A nested table before the keys, and semicolons for separators. Both are Lua a
-# user can reasonably write, and neither ends the rule.
-write_nested_table_config() {
-  cat >"$monitor_lua" <<'LUA'
-hl.monitor({ output = "eDP-1", reserved_area = { top = 24 }, position = "0x0", scale = 1.25 })
-LUA
-}
-
-write_block_comment_config() {
-  cat >"$monitor_lua" <<'LUA'
-hl.monitor({ output = "eDP-1", --[[ internal panel ]] position = "0x0", scale = 1.25 })
-LUA
-}
-
-write_semicolon_config() {
-  cat >"$monitor_lua" <<'LUA'
-hl.monitor({ output = "eDP-1"; position = "0x0"; scale = 1.25; transform = 1 })
-LUA
-}
-
-# A numeric catch-all scale with no rule -- specific or catch-all -- naming a
-# position at all, so read_monitor_position has nothing configured to read.
-write_catchall_scale_only_config() {
-  cat >"$monitor_lua" <<'LUA'
-hl.monitor({ output = "", mode = "preferred", scale = 1.5 })
-LUA
-}
-
-# The catch-all rule names a position, but read_monitor_position only ever
-# consults a rule specific to the internal output -- the catch-all's position
-# must not leak in as if it were configured for the internal panel.
-write_catchall_position_config() {
-  cat >"$monitor_lua" <<'LUA'
-hl.monitor({ output = "", mode = "preferred", position = "0x0", scale = 1 })
-LUA
-}
 
 remember_scale() {
   mkdir -p "$state_dir"
   printf '%s\n' "$1" >"$scale_state"
 }
 
-# OMARCHY_TEST_UNDOCK=true starts from a docked state: the clamshell flag is set
-# and the panel is off until the script's reload turns it back on.
-run_clamshell() {
-  rm -f "$reloaded_marker" "$clamshell_flag"
-  if [[ ${OMARCHY_TEST_UNDOCK:-false} == "true" ]]; then
-    mkdir -p "$state_dir"
-    printf 'hl.monitor({ output = "eDP-1", disabled = true })\n' >"$clamshell_flag"
-  fi
+export OMARCHY_PATH="$ROOT"
 
-  rm -f "$test_tmp/applied-scale"
+run_clamshell() {
+  rm -f "$test_tmp/reloaded" "$test_tmp/applied" "$state_dir/internal-monitor-clamshell.lua"
+
   HOME="$home_dir" \
-    OMARCHY_TEST_APPLIED_MARKER="$test_tmp/applied-scale" \
-    OMARCHY_TEST_RELOADED="$reloaded_marker" \
-    OMARCHY_TEST_EXTERNAL_NAME="${OMARCHY_TEST_EXTERNAL_NAME:-HDMI-A-1}" \
-    OMARCHY_TEST_EXTERNAL_MAKE="${OMARCHY_TEST_EXTERNAL_MAKE-Samsung Electric Company}" \
-    OMARCHY_TEST_EXTERNAL_MODEL="${OMARCHY_TEST_EXTERNAL_MODEL-LF24T35}" \
-    OMARCHY_TEST_EXTERNAL_SERIAL="${OMARCHY_TEST_EXTERNAL_SERIAL-HX5X721467}" \
-    OMARCHY_TEST_EXTRA_EXTERNALS="${OMARCHY_TEST_EXTRA_EXTERNALS:-}" \
-    OMARCHY_TEST_EXTERNAL_X="${OMARCHY_TEST_EXTERNAL_X:-1920}" \
-    OMARCHY_TEST_EXTERNAL_TRANSFORM="${OMARCHY_TEST_EXTERNAL_TRANSFORM:-0}" \
-    OMARCHY_TEST_EXTERNAL_WIDTH="${OMARCHY_TEST_EXTERNAL_WIDTH:-1920}" \
-    OMARCHY_TEST_EXTERNAL_HEIGHT="${OMARCHY_TEST_EXTERNAL_HEIGHT:-1080}" \
     PATH="$stub_bin:$PATH" \
+    OMARCHY_TEST_RELOADED="$test_tmp/reloaded" \
+    OMARCHY_TEST_APPLIED_MARKER="$test_tmp/applied" \
     OMARCHY_TEST_HYPRCTL_EVAL_LOG="$eval_log" \
     OMARCHY_TEST_INTERNAL_SCALE="${OMARCHY_TEST_INTERNAL_SCALE:-2}" \
-    OMARCHY_TEST_INTERNAL_X="${OMARCHY_TEST_INTERNAL_X:-0}" \
-    OMARCHY_TEST_INTERNAL_Y="${OMARCHY_TEST_INTERNAL_Y:-0}" \
     OMARCHY_TEST_INTERNAL_DISABLED="${OMARCHY_TEST_INTERNAL_DISABLED:-false}" \
     OMARCHY_TEST_EXTERNAL_ACTIVE="${OMARCHY_TEST_EXTERNAL_ACTIVE:-false}" \
     OMARCHY_TEST_CLAMSHELL="${OMARCHY_TEST_CLAMSHELL:-false}" \
+    OMARCHY_TEST_EXTERNAL_CONNECTED="${OMARCHY_TEST_EXTERNAL_CONNECTED:-false}" \
+    OMARCHY_TEST_OTHER_OUTPUT="${OMARCHY_TEST_OTHER_OUTPUT:-}" \
     "$ROOT/bin/omarchy-hyprland-monitor-clamshell"
 }
+
+# Writes stdin as monitors.lua and runs a clamshell sync with the internal panel
+# at scale $2 ("off" when it is disabled) and $3 remembered ("-" for nothing).
+# Each remaining argument must appear in what was applied, or, with a leading
+# "!", must not; "!scale = " means no scale was applied at all.
+expect_sync() {
+  local description=$1 active=$2 remembered=$3 expectation
+  shift 3
+
+  cat >"$monitor_lua"
+  rm -f "$scale_state"
+  [[ $remembered == "-" ]] || remember_scale "$remembered"
+  : >"$eval_log"
+  if [[ $active == "off" ]]; then
+    OMARCHY_TEST_INTERNAL_DISABLED=true run_clamshell
+  else
+    OMARCHY_TEST_INTERNAL_SCALE=$active run_clamshell
+  fi
+
+  for expectation in "$@"; do
+    if [[ $expectation == !* ]]; then
+      ! grep -F -- "${expectation#!}" "$eval_log" >/dev/null || fail "$description" "$(<"$eval_log")"
+    else
+      grep -F -- "$expectation" "$eval_log" >/dev/null || fail "$description" "$(<"$eval_log")"
+    fi
+  done
+  pass "$description"
+}
+
+auto_config='local omarchy_gdk_scale = 2
+local omarchy_monitor_scale = "auto"'
+
+internal_config='hl.monitor({ output = "eDP-1", mode = "preferred", position = "0x0", scale = 1.25 })
+hl.monitor({ output = "", mode = "preferred", position = "auto-right", scale = 1 })'
+
+# A local holding an expression rather than a scalar. Half of it is not a scale.
+expression_config='local omarchy_monitor_scale = 3 / 2
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale })'
+
+# A local named after a quoted scale value. The quotes make the rule's "auto" a
+# string, so the local must not be substituted for it.
+shadowed_auto_config='local auto = 1.5
+hl.monitor({ output = "eDP-1", mode = "preferred", position = "auto", scale = "auto" })'
 
 # Regression (#7265, #7301): with scale = "auto" the compositor's resolution of
 # it IS the configured scale, not a transient to correct. Forcing a number here
 # made the scale flap: every idle-wake applied the fallback 2, every config
 # reload resolved auto back to the panel's own value.
-write_auto_monitor_config
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_SCALE=3 run_clamshell
-! grep -F 'scale = ' "$eval_log" >/dev/null || fail "clamshell recovery leaves an auto-scaled panel alone"
+expect_sync "clamshell recovery leaves an auto-scaled panel alone" 3 - '!scale = ' <<<"$auto_config"
 [[ ! -f $scale_state ]] || fail "clamshell recovery does not remember transient scale"
-pass "clamshell recovery leaves an auto-scaled panel alone"
 
-# The same delegation through the shipped default config, where "auto" reaches
-# the panel via the catch-all rule's bare-word reference to the local.
-write_default_auto_config
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_SCALE=3 run_clamshell
-! grep -F 'scale = ' "$eval_log" >/dev/null || fail "clamshell recovery leaves the shipped auto default alone"
-pass "clamshell recovery leaves the shipped auto default alone"
+# The shipped default, where "auto" reaches the panel via the catch-all rule's
+# bare-word reference to the local.
+expect_sync "clamshell recovery leaves the shipped auto default alone" 3 - '!scale = ' <<'LUA'
+local omarchy_gdk_scale = 2
+local omarchy_monitor_scale = "auto"
+
+hl.env("GDK_SCALE", tostring(omarchy_gdk_scale))
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale })
+LUA
+
+# An expression or an explicit "auto" is Hyprland's to evaluate: it names no
+# number to correct an enabled panel toward, remembered or not.
+expect_sync "clamshell recovery leaves an expression-scaled panel alone" 3 1.75 '!scale = ' <<<"$expression_config"
+expect_sync "clamshell recovery leaves an explicitly auto panel alone" 3 1.75 '!scale = ' <<<"$shadowed_auto_config"
 
 # A numeric config keeps both sync behaviors: a matching active scale is not
 # reapplied, and a drifted one is corrected back to the configured value.
-write_internal_monitor_config
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_SCALE=1.25 run_clamshell
-! grep -F 'scale = ' "$eval_log" >/dev/null || fail "clamshell recovery does not reapply matching scale"
-pass "clamshell recovery avoids redundant scale apply"
+expect_sync "clamshell recovery avoids redundant scale apply" 1.25 - '!scale = ' <<<"$internal_config"
+expect_sync "clamshell recovery corrects a drifted numeric scale" 3 - 'scale = 1.25' <<<"$internal_config"
 
-write_internal_monitor_config
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_SCALE=3 run_clamshell
-grep -F 'scale = 1.25' "$eval_log" >/dev/null || fail "clamshell recovery corrects a drifted numeric scale"
-pass "clamshell recovery corrects a drifted numeric scale"
-
-write_auto_monitor_config
+printf '%s\n' "$auto_config" >"$monitor_lua"
+rm -f "$scale_state"
 : >"$eval_log"
 OMARCHY_TEST_INTERNAL_SCALE=1.6 OMARCHY_TEST_EXTERNAL_ACTIVE=true OMARCHY_TEST_CLAMSHELL=true run_clamshell
 [[ -f $scale_state ]] || fail "clamshell disable remembers internal scale"
@@ -338,28 +201,16 @@ grep -F 'scale = 1.6' "$eval_log" >/dev/null || fail "clamshell recovery uses re
 ! grep -F 'scale = "auto"' "$eval_log" >/dev/null || fail "clamshell recovery avoids auto after disabled internal display"
 pass "clamshell recovery uses remembered internal scale"
 
-# A configured rule still positions a panel that scale recovery brings back.
-write_internal_monitor_config
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_DISABLED=true run_clamshell
-grep -F 'position = "0x0"' "$eval_log" >/dev/null || fail "clamshell recovery uses configured internal position"
-grep -F 'scale = 1.25' "$eval_log" >/dev/null || fail "clamshell recovery uses configured internal scale"
-pass "clamshell recovery uses configured internal monitor rule"
+# Recovery of a panel that is off, under an auto config with nothing
+# remembered, still needs a number: the historical default 2.
+expect_sync "clamshell recovery falls back to the default scale" off - 'scale = 2' <<<"$auto_config"
 
-# Scale recovery of a panel that is still off, with nothing remembered, needs a
-# number: the historical default 2, and Hyprland's own "auto" position.
-write_auto_monitor_config
-rm -f "$scale_state" "$position_state"
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_DISABLED=true run_clamshell
-grep -F 'scale = 2' "$eval_log" >/dev/null || fail "clamshell recovery falls back to the default scale"
-grep -F 'position = "auto"' "$eval_log" >/dev/null || fail "clamshell recovery falls back to auto position"
-pass "clamshell recovery falls back to the default scale and position"
+expect_sync "clamshell recovery uses configured internal monitor rule" off - 'position = "0x0"' 'scale = 1.25' <<<"$internal_config"
 
 # Scale correction of a panel that is already on keeps its place, instead of
 # sending it to the end of the layout with "auto".
-write_catchall_scale_only_config
-rm -f "$position_state"
+printf '%s\n' 'hl.monitor({ output = "", mode = "preferred", scale = 1.5 })' >"$monitor_lua"
+
 : >"$eval_log"
 OMARCHY_TEST_INTERNAL_SCALE=3 OMARCHY_TEST_INTERNAL_X=0 run_clamshell
 grep -F 'scale = 1.5' "$eval_log" >/dev/null || fail "a live scale correction applies the configured scale"
@@ -369,7 +220,6 @@ pass "a live scale correction keeps the panel where it is"
 printf '%s\n' 'hl.monitor({ output = "eDP-1", mode = "1280x720", position = "auto", scale = 1.5 })' >"$monitor_lua"
 : >"$eval_log"
 OMARCHY_TEST_INTERNAL_SCALE=3 run_clamshell
-! grep -F 'mode = "preferred"' "$eval_log" >/dev/null || fail "scale correction preserves the configured mode"
 HOME="$home_dir" lua - "$eval_log" <<'LUA'
 local calls = 0
 hl = {
@@ -384,7 +234,7 @@ dofile(arg[1])
 assert(calls == 1, "scale correction must emit one panel rule")
 LUA
 pass "moving or scaling a panel preserves its configured mode and rotation"
-write_catchall_scale_only_config
+printf '%s\n' 'hl.monitor({ output = "", mode = "preferred", scale = 1.5 })' >"$monitor_lua"
 
 # ...unless the new scale widens it into a neighbor: a 1920px panel at scale 3
 # is 640 wide, and at scale 1.5 it is 1280, past an external at 700.
@@ -419,127 +269,104 @@ LUA
 done
 pass "scale correction checks the applied scale and allows touching edges without overlap"
 
-# Regression: specific-output rule referencing the omarchy_monitor_scale
-# variable must resolve to the variable's value, not fall back to the default.
-write_internal_monitor_var_config
-rm -f "$scale_state"
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_DISABLED=true run_clamshell
-grep -F 'scale = 1.5' "$eval_log" >/dev/null || fail "clamshell recovery resolves omarchy_monitor_scale variable reference"
-pass "clamshell recovery resolves omarchy_monitor_scale variable reference"
+# A rule referencing a local resolves to the local's value, not the literal name.
+expect_sync "clamshell recovery resolves omarchy_monitor_scale variable reference" off - 'scale = 1.5' <<'LUA'
+local omarchy_gdk_scale = 1.5
+local omarchy_monitor_scale = 1.5
+hl.env("GDK_SCALE", tostring(omarchy_gdk_scale))
+hl.monitor({ output = "eDP-1", mode = "preferred", position = "auto", scale = omarchy_monitor_scale })
+LUA
 
 # An explicit "auto" on the internal rule is a value, not a variable reference,
 # so it must not pick up an unrelated omarchy_monitor_scale local.
-write_internal_monitor_auto_config
-remember_scale 1.75
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_DISABLED=true run_clamshell
-grep -F 'scale = 1.75' "$eval_log" >/dev/null || fail "clamshell recovery keeps auto scale off the omarchy_monitor_scale local"
-pass "clamshell recovery keeps auto scale off the omarchy_monitor_scale local"
+expect_sync "clamshell recovery keeps auto scale off the omarchy_monitor_scale local" off 1.75 'scale = 1.75' <<'LUA'
+local omarchy_monitor_scale = 2
+hl.monitor({ output = "eDP-1", mode = "preferred", position = "auto", scale = "auto" })
+LUA
 
-# The catch-all rule does not apply to an output that has its own rule.
-write_internal_monitor_unresolvable_config
-remember_scale 1.75
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_DISABLED=true run_clamshell
-grep -F 'scale = 1.75' "$eval_log" >/dev/null || fail "clamshell recovery ignores the catch-all rule when the internal panel has its own"
-pass "clamshell recovery ignores the catch-all rule when the internal panel has its own"
+# The internal rule names a local that does not exist. The catch-all rule never
+# applies to an output that has its own rule, so it must not be read.
+expect_sync "clamshell recovery ignores the catch-all rule when the internal panel has its own" off 1.75 'scale = 1.75' <<'LUA'
+hl.monitor({ output = "eDP-1", mode = "preferred", position = "auto", scale = my_scale })
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1 })
+LUA
 
-write_catch_all_var_config
-rm -f "$scale_state"
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_DISABLED=true run_clamshell
-grep -F 'scale = 1.5' "$eval_log" >/dev/null || fail "clamshell recovery resolves a quoted scale through the catch-all rule"
-pass "clamshell recovery resolves a quoted scale through the catch-all rule"
+# No rule for the internal panel, and the catch-all references the local:
+# quoted here, and commented below.
+expect_sync "clamshell recovery resolves a quoted scale through the catch-all rule" off - 'scale = 1.5' <<'LUA'
+local omarchy_monitor_scale = "1.5"
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale })
+LUA
 
-write_commented_catch_all_var_config
-rm -f "$scale_state"
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_DISABLED=true run_clamshell
-grep -F 'scale = 1.25' "$eval_log" >/dev/null || fail "clamshell recovery ignores a trailing comment on the scale local"
-pass "clamshell recovery ignores a trailing comment on the scale local"
+expect_sync "clamshell recovery ignores a trailing comment on the scale local" off - 'scale = 1.25' <<'LUA'
+local omarchy_monitor_scale = 1.25 -- HiDPI panel
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = omarchy_monitor_scale })
+LUA
 
-write_internal_monitor_position_var_config
-rm -f "$scale_state"
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_DISABLED=true run_clamshell
-grep -F 'position = "0x0"' "$eval_log" >/dev/null || fail "clamshell recovery resolves a position variable reference"
-pass "clamshell recovery resolves a position variable reference"
+expect_sync "clamshell recovery resolves a position variable reference" off - 'position = "0x0"' <<'LUA'
+local omarchy_monitor_position = "0x0"
+hl.monitor({ output = "eDP-1", mode = "preferred", position = omarchy_monitor_position, scale = 1.25 })
+LUA
 
 # An internal rule that names no scale leaves the catch-all to supply one. Only
 # a rule that names a scale keeps the catch-all away from the internal panel.
-write_internal_monitor_scaleless_config
-remember_scale 1.75
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_DISABLED=true run_clamshell
-grep -F 'scale = 1' "$eval_log" >/dev/null || fail "clamshell recovery takes the catch-all scale when the internal rule omits one"
-! grep -F 'scale = 1.75' "$eval_log" >/dev/null || fail "clamshell recovery prefers the catch-all scale over the remembered one"
-pass "clamshell recovery takes the catch-all scale when the internal rule omits one"
+expect_sync "clamshell recovery takes the catch-all scale when the internal rule omits one" off 1.75 'scale = 1' '!scale = 1.75' <<'LUA'
+hl.monitor({ output = "eDP-1", mode = "preferred", position = "auto", transform = 1 })
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1 })
+LUA
 
-# Half of `3 / 2` is not the scale the user asked for.
-write_expression_scale_config
-remember_scale 1.75
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_DISABLED=true run_clamshell
-grep -F 'scale = 1.75' "$eval_log" >/dev/null || fail "clamshell recovery leaves an expression scale unresolved"
-pass "clamshell recovery leaves an expression scale unresolved"
+expect_sync "clamshell recovery leaves an expression scale unresolved" off 1.75 'scale = 1.75' <<<"$expression_config"
+expect_sync "clamshell recovery does not resolve a quoted scale against a local" off 1.75 'scale = 1.75' <<<"$shadowed_auto_config"
 
-# An expression is Hyprland's to evaluate, not this parser's: like "auto", it
-# names no number to correct an enabled panel toward.
-write_expression_scale_config
-remember_scale 1.75
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_SCALE=3 run_clamshell
-! grep -F 'scale = ' "$eval_log" >/dev/null || fail "clamshell recovery leaves an expression-scaled panel alone"
-pass "clamshell recovery leaves an expression-scaled panel alone"
+expect_sync "clamshell recovery leaves an expression scale in a rule unresolved" off 1.75 'scale = 1.75' <<'LUA'
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 3 / 2 })
+LUA
 
-# A quoted value is a string, not a reference to a local of the same name.
-write_shadowed_auto_config
-remember_scale 1.75
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_DISABLED=true run_clamshell
-grep -F 'scale = 1.75' "$eval_log" >/dev/null || fail "clamshell recovery does not resolve a quoted scale against a local"
-pass "clamshell recovery does not resolve a quoted scale against a local"
+# Commented-out text after a rule is not a rule, and not one of its keys either.
+expect_sync "clamshell recovery does not read a rule out of a trailing comment" off 1.75 'scale = 1.5' <<'LUA'
+hl.monitor({ output = "DP-1", mode = "preferred", position = "auto", scale = 1 }) -- output = "eDP-1"
+hl.monitor({ output = "", mode = "preferred", position = "auto", scale = 1.5 })
+LUA
 
-# An explicit "auto" on the internal rule delegates just the same: while the
-# panel is enabled, it is not corrected toward the remembered scale.
-write_shadowed_auto_config
-remember_scale 1.75
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_SCALE=3 run_clamshell
-! grep -F 'scale = ' "$eval_log" >/dev/null || fail "clamshell recovery leaves an explicitly auto panel alone"
-pass "clamshell recovery leaves an explicitly auto panel alone"
+expect_sync "clamshell recovery does not read a scale out of a trailing comment" off 1.75 'scale = 1.25' <<'LUA'
+hl.monitor({ output = "eDP-1", mode = "preferred", position = "auto", scale = 1.25 }) -- scale = 3
+LUA
 
-# Half of `3 / 2` is no better inside the rule than inside a local.
-write_expression_rule_config
-remember_scale 1.75
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_DISABLED=true run_clamshell
-grep -F 'scale = 1.75' "$eval_log" >/dev/null || fail "clamshell recovery leaves an expression scale in a rule unresolved"
-pass "clamshell recovery leaves an expression scale in a rule unresolved"
-
-# A commented-out output must not pass for a rule the internal panel owns.
-write_commented_rule_config
-remember_scale 1.75
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_DISABLED=true run_clamshell
-grep -F 'scale = 1.5' "$eval_log" >/dev/null || fail "clamshell recovery does not read a rule out of a trailing comment"
-pass "clamshell recovery does not read a rule out of a trailing comment"
-
-# Nor must a commented-out key displace the real one.
-write_commented_internal_rule_config
-remember_scale 1.75
-: >"$eval_log"
-OMARCHY_TEST_INTERNAL_DISABLED=true run_clamshell
-grep -F 'scale = 1.25' "$eval_log" >/dev/null || fail "clamshell recovery does not read a scale out of a trailing comment"
-pass "clamshell recovery does not read a scale out of a trailing comment"
-
-for config in nested_table semicolon block_comment; do
-  "write_${config}_config"
-  remember_scale 1.75
-  : >"$eval_log"
-  OMARCHY_TEST_INTERNAL_DISABLED=true run_clamshell
-  grep -F 'position = "0x0"' "$eval_log" >/dev/null || fail "clamshell recovery reads the position out of a ${config//_/ } rule"
-  grep -F 'scale = 1.25' "$eval_log" >/dev/null || fail "clamshell recovery reads the scale out of a ${config//_/ } rule"
-  pass "clamshell recovery reads a ${config//_/ } rule"
+# A nested table before the keys, a block comment, and semicolons for
+# separators. All are Lua a user can reasonably write, and none ends the rule.
+for rule in \
+  'hl.monitor({ output = "eDP-1", reserved_area = { top = 24 }, position = "0x0", scale = 1.25 })' \
+  'hl.monitor({ output = "eDP-1", --[[ internal panel ]] position = "0x0", scale = 1.25 })' \
+  'hl.monitor({ output = "eDP-1"; position = "0x0"; scale = 1.25; transform = 1 })'; do
+  expect_sync "clamshell recovery reads the position and scale out of: $rule" off 1.75 'position = "0x0"' 'scale = 1.25' <<<"$rule"
 done
+
+# A panel turned off from the Display panel is a runtime disabled = true with
+# no flag. Once the external display is unplugged, the recovery's rule update
+# has to say disabled = false, or the panel stays off behind Hyprland's
+# FALLBACK (#16307). While an external display or a headless output is still
+# there, the choice to run on it alone stands, since the docked poll reaches
+# this every two seconds.
+OMARCHY_TEST_OTHER_OUTPUT=FALLBACK \
+  expect_sync "clamshell recovery turns a panel-disabled display back on once nothing external is connected" off - \
+  'disabled = false' 'position = "0x0"' 'scale = 1.25' <<<"$internal_config"
+lua - "$eval_log" <<'LUA'
+local calls = 0
+hl = {
+  get_monitor = function() return nil end,
+  monitor = function(rule)
+    calls = calls + 1
+    assert(rule.disabled == false, "an unplugged panel must be enabled")
+    assert(rule.mode == "preferred", "an absent panel needs a preferred mode")
+    assert(rule.position == "0x0" and rule.scale == 1.25, "recovery preserves configured geometry")
+  end,
+}
+dofile(arg[1])
+assert(calls == 1, "unplug recovery must emit one panel rule")
+LUA
+OMARCHY_TEST_EXTERNAL_CONNECTED=true OMARCHY_TEST_EXTERNAL_ACTIVE=true OMARCHY_TEST_OTHER_OUTPUT=DP-1 \
+  expect_sync "clamshell recovery leaves a panel-disabled display off while an external display is connected" off - \
+  'scale = 1.25' '!disabled = false' <<<"$internal_config"
+OMARCHY_TEST_EXTERNAL_ACTIVE=true OMARCHY_TEST_OTHER_OUTPUT=HEADLESS-1 \
+  expect_sync "clamshell recovery leaves a panel-disabled display off while a headless output is enabled" off - \
+  'scale = 1.25' '!disabled = false' <<<"$internal_config"
